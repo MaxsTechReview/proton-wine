@@ -930,9 +930,16 @@ int WINAPI wWinMain(HINSTANCE hinstance,
         ERR( "Could not initialize COM\n" );
         ExitProcess(EXIT_FAILURE);
     }
+    ERR("WINNATIVE_EXPLORERDIAG cmdline=%s root=%s isdir=%d\n",
+        debugstr_w(cmdline), debugstr_w(parameters.root),
+        parameters.root[0] ? PathIsDirectoryW(parameters.root) : -1);
     if(parameters.root[0] && !PathIsDirectoryW(parameters.root))
-        if(ShellExecuteW(NULL,NULL,parameters.root,NULL,NULL,SW_SHOWDEFAULT) > (HINSTANCE)32)
+    {
+        HINSTANCE _h = ShellExecuteW(NULL,NULL,parameters.root,NULL,NULL,SW_SHOWDEFAULT);
+        ERR("WINNATIVE_EXPLORERDIAG ShellExecuteW(%s) -> %p\n", debugstr_w(parameters.root), _h);
+        if(_h > (HINSTANCE)32)
             ExitProcess(EXIT_SUCCESS);
+    }
     init_info.dwSize = sizeof(INITCOMMONCONTROLSEX);
     init_info.dwICC = ICC_USEREX_CLASSES | ICC_BAR_CLASSES | ICC_COOL_CLASSES;
     if(!InitCommonControlsEx(&init_info))

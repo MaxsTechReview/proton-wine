@@ -1788,13 +1788,17 @@ static NTSTATUS MODULE_InitDLL( WINE_MODREF *wm, UINT reason, LPVOID lpReserved 
     {
         retv = call_dll_entry_point( entry, module, reason, lpReserved );
         if (!retv)
+        {
             status = STATUS_DLL_INIT_FAILED;
+            ERR("WINNATIVE_DLLDIAG DllMain %s reason=%s returned FALSE -> STATUS_DLL_INIT_FAILED\n",
+                debugstr_w(wm->ldr.BaseDllName.Buffer), reason_names[reason]);
+        }
     }
     __EXCEPT_ALL
     {
         status = GetExceptionCode();
-        TRACE_(relay)("\1exception %08lx in PE entry point (proc=%p,module=%p,reason=%s,res=%p)\n",
-                      status, entry, module, reason_names[reason], lpReserved );
+        ERR("WINNATIVE_DLLDIAG DllMain %s reason=%s EXCEPTION 0x%08lx\n",
+            debugstr_w(wm->ldr.BaseDllName.Buffer), reason_names[reason], status);
     }
     __ENDTRY
 
@@ -2641,6 +2645,11 @@ static BOOL is_valid_binary( HANDLE file, const SECTION_IMAGE_INFORMATION *info 
     if (NtCurrentTeb()->WowTebOffset) return TRUE;
     /* support ARM64EC binaries on x86-64 */
     if (current_machine == IMAGE_FILE_MACHINE_AMD64 && has_chpe_metadata( file, info )) return TRUE;
+    /* WinNative: support ARM64X hybrid PE on native ARM64 host. Our Wine is
+     * built with --enable-archs=arm64ec,aarch64 which produces hybrid PEs in
+     * aarch64-windows/. Without this, Wine rejects every builtin DLL with
+     * STATUS_INVALID_IMAGE_FORMAT on ARM64 hosts. */
+    if (current_machine == IMAGE_FILE_MACHINE_ARM64 && has_chpe_metadata( file, info )) return TRUE;
     /* support 32-bit IL-only images on 64-bit */
     if (!info->ImageContainsCode) return TRUE;
     if (info->ComPlusNativeReady) return TRUE;
@@ -3554,7 +3563,7 @@ done:
     if (nts == STATUS_SUCCESS)
         TRACE("Loaded module %s at %p\n", debugstr_us(&nt_name), (*pwm)->ldr.DllBase);
     else
-        WARN("Failed to load module %s; status=%lx\n", debugstr_w(libname), nts);
+        WARN("WINNATIVE_DLLDIAG load_dll(%s) FAILED status=0x%08lx\n", debugstr_w(libname), nts);
 
     if (mapping) NtClose( mapping );
     RtlFreeUnicodeString( &nt_name );

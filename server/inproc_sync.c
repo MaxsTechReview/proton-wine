@@ -50,17 +50,37 @@ int get_inproc_device_fd(void)
     static int fd = -2;
     if (fd == -2)
     {
-        if (getenv( "PROTON_NO_NTSYNC" ) && atoi(getenv( "PROTON_NO_NTSYNC" )))
+        /* Sync-mode selection (one-and-only-one active at a time):
+         *  - WINEESYNC=1         → strict ESync: skip /dev/ntsync probe entirely.
+         *  - WINENTSYNC=0        → explicit NTSync opt-out.
+         *  - PROTON_NO_NTSYNC=1  → legacy NTSync blocker.
+         *  - otherwise           → auto-probe /dev/ntsync. If present, NTSync
+         *                          wins and the client code disables ESync.
+         *                          If absent, client falls back to ESync. */
+        const char *esync_env  = getenv( "WINEESYNC" );
+        const char *ntsync_env = getenv( "WINENTSYNC" );
+        int esync_forced      = esync_env  && atoi( esync_env  ) > 0;
+        int ntsync_opt_out    = ntsync_env && atoi( ntsync_env ) == 0;
+        int ntsync_blocked    = getenv( "PROTON_NO_NTSYNC" ) && atoi( getenv( "PROTON_NO_NTSYNC" ) );
+
+        if (esync_forced || ntsync_opt_out || ntsync_blocked)
             fd = -1;
         else
             fd = open( "/dev/ntsync", O_CLOEXEC | O_RDONLY );
+
         if (fd >= 0)
         {
             do_fsync_cached = 0;
-            fprintf( stderr, "ntsync: up and running.\n" );
+            fprintf( stderr, "ntsync: up and running (auto-selected).\n" );
         }
+        else if (esync_forced)
+            fprintf( stderr, "wineserver: WINEESYNC=1 forced — NTSync skipped, client uses ESync.\n" );
+        else if (ntsync_opt_out)
+            fprintf( stderr, "wineserver: WINENTSYNC=0 — NTSync disabled, client falls back to ESync.\n" );
+        else if (ntsync_blocked)
+            fprintf( stderr, "wineserver: NTSync blocked by PROTON_NO_NTSYNC — client falls back to ESync.\n" );
         else if (do_fsync()) fd = FSYNC_USED_BY_SERVER;
-        else fprintf( stderr, "wineserver: using server-side synchronization.\n" );
+        else fprintf( stderr, "wineserver: /dev/ntsync unavailable (needs Linux 6.14+ kernel) — client falls back to ESync.\n" );
     }
     return fd;
 }

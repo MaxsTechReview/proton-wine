@@ -24,9 +24,11 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
 #ifdef HAVE_STDINT_H
@@ -213,9 +215,75 @@ const struct sid *security_unix_uid_to_sid( uid_t uid )
         return &anonymous_logon_sid;
 }
 
+/* Derive /data/data/<pkg>/files/imagefs/etc/machine-id from /proc/self/exe.
+ * On Android, every host process launched from an app's sandbox lives under
+ * /data/data/<pkg>/... — we can extract <pkg> at runtime instead of hard-
+ * coding package names per Winlator fork (Ludashi, WinNative, vanilla CMOD,
+ * etc.). Fills `buf` (size `buflen`) and returns 1 on success, 0 on failure. */
+static int derive_machine_id_path_from_exe( char *buf, size_t buflen )
+{
+    char exe[PATH_MAX];
+    ssize_t n;
+    const char *prefix = "/data/data/";
+    const char *p, *end;
+    size_t pkg_len;
+
+    n = readlink( "/proc/self/exe", exe, sizeof(exe) - 1 );
+    if (n <= 0) return 0;
+    exe[n] = 0;
+
+    if (strncmp( exe, prefix, strlen(prefix) ) != 0) return 0;
+    p = exe + strlen(prefix);
+    end = strchr( p, '/' );
+    if (!end || end == p) return 0;
+
+    pkg_len = (size_t)(end - p);
+    if (pkg_len >= buflen) return 0;
+
+    if ((size_t)snprintf( buf, buflen, "/data/data/%.*s/files/imagefs/etc/machine-id",
+                          (int)pkg_len, p ) >= buflen)
+        return 0;
+    return 1;
+}
+
+/* FNV-1a 64-bit hash of a NUL-terminated string; used as a stable machine-id
+ * fallback seed when no real machine-id file exists (common on Android where
+ * /etc is read-only and the app sandbox hasn't seeded one). */
+static uint64_t machine_id_fnv_hash( const char *s )
+{
+    uint64_t h = 0xcbf29ce484222325ULL;
+    while (*s) { h ^= (unsigned char)*s++; h *= 0x100000001b3ULL; }
+    return h;
+}
+
+/* Derive a stable 16-hex-char synthesized machine-id from host state
+ * (hostname + uid + /proc/self/exe). Non-cryptographic; just needs to be
+ * deterministic per-device so SID sub_auth values stay consistent across
+ * boots of the same prefix. */
+static void synthesize_machine_id( char out[17] )
+{
+    char host[256] = "android";
+    char exe[PATH_MAX] = "";
+    char seed[PATH_MAX + 512];
+    ssize_t n;
+    uint64_t hi, lo;
+
+    gethostname( host, sizeof(host) - 1 );
+    host[sizeof(host) - 1] = 0;
+    if ((n = readlink( "/proc/self/exe", exe, sizeof(exe) - 1 )) > 0) exe[n] = 0;
+    snprintf( seed, sizeof(seed), "%s|%u|%s", host, (unsigned)getuid(), exe );
+
+    hi = machine_id_fnv_hash( seed );
+    /* Perturb for low 64 bits */
+    lo = machine_id_fnv_hash( seed ) ^ 0xa5a5a5a5a5a5a5a5ULL;
+    lo = (lo << 1) | (lo >> 63);
+    snprintf( out, 17, "%08x%08x", (unsigned)(hi >> 32), (unsigned)(lo & 0xffffffffULL) );
+}
+
 void init_user_sid(void)
 {
     char machine_id[17];
+    char derived_path[PATH_MAX];
     uint64_t id;
     size_t n;
     FILE *f;
@@ -223,8 +291,41 @@ void init_user_sid(void)
     f = fopen( "/etc/machine-id", "r" );
     if (!f)
     {
-        fprintf( stderr, "Failed to open /etc/machine-id, error %s.\n", strerror( errno ));
-        return;
+        /* Android fallback: /etc is read-only, machine-id lives in the app's
+         * sandbox. Runtime detection via /proc/self/exe covers every Winlator
+         * fork without a hardcoded package table. WINE_MACHINE_ID_FILE env
+         * overrides everything. Legacy static candidates remain as backstop
+         * for environments where /proc/self/exe doesn't resolve under /data/data. */
+        const char *env = getenv( "WINE_MACHINE_ID_FILE" );
+        static const char *const legacy_candidates[] = {
+            "/data/local/tmp/machine-id",
+            "/data/data/com.winnative.cmod/files/imagefs/etc/machine-id",
+            "/data/data/com.ludashi.benchmark/files/imagefs/etc/machine-id",
+            "/data/data/com.winlator.cmod/files/imagefs/etc/machine-id",
+            "/data/data/com.winlator.omod/files/imagefs/etc/machine-id",
+            "/data/data/com.winlator/files/imagefs/etc/machine-id",
+            NULL
+        };
+        const char *const *p;
+
+        if (env) f = fopen( env, "r" );
+        if (!f && derive_machine_id_path_from_exe( derived_path, sizeof(derived_path) ))
+            f = fopen( derived_path, "r" );
+        if (!f) for (p = legacy_candidates; *p; ++p)
+            if ((f = fopen( *p, "r" ))) break;
+
+        if (!f)
+        {
+            /* No real machine-id file anywhere — synthesize a stable seed from
+             * hostname + uid + exe path. SID sub_auth values remain consistent
+             * across boots of the same device/prefix. No stderr noise. */
+            synthesize_machine_id( machine_id );
+            id = strtoull( machine_id, NULL, 0x10 );
+            local_user_sid.sub_auth[1] = id >> 32;
+            local_user_sid.sub_auth[2] = id & 0xffffffff;
+            local_user_sid.sub_auth[3] = getuid();
+            return;
+        }
     }
 
     n = fread( machine_id, sizeof(*machine_id), 16, f );
@@ -232,8 +333,9 @@ void init_user_sid(void)
 
     if (n != 16)
     {
-        fprintf( stderr, "Failed to read /etc/machine-id, error %s.\n", strerror( errno ));
-        return;
+        /* Corrupt/short file — fall back to synthesis instead of noisy stderr. */
+        synthesize_machine_id( machine_id );
+        n = 16;
     }
     machine_id[n] = 0;
     id = strtoull( machine_id, NULL, 0x10 );

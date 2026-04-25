@@ -1491,6 +1491,8 @@ void* wld_start( void **stack )
             if (preload_info[i].addr >= (void *)0x10000
 #ifdef __aarch64__
                 && preload_info[i].addr < (void *)0x7fffffffff /* ARM64 address space might end here*/
+# elif __ANDROID__
+                && preload_info[i].addr < (void *)0x7fffffffff /* ARM64 address space might end here*/
 #endif
             )
                 wld_printf( "preloader: Warning: failed to reserve range %p-%p\n",
@@ -1515,7 +1517,6 @@ void* wld_start( void **stack )
     /* expose ld.so _r_debug as a separate namespace in r_next */
     ld_so_r_debug = find_symbol( &ld_so_map, "_r_debug", STT_OBJECT );
     if (ld_so_r_debug) _r_debug.r_next = (struct wld_r_debug_extended *)ld_so_r_debug;
-    else wld_printf( "_r_debug not found in ld.so\n" );
 
     _r_debug_state(); /* notify GDB that _r_debug is ready */
 

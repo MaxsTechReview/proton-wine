@@ -549,6 +549,11 @@ static NTSTATUS WINAPI pdo_pnp(DEVICE_OBJECT *device, IRP *irp)
         status = irp->IoStatus.Status;
         break;
 
+    case IRP_MN_QUERY_DEVICE_TEXT:
+        /* WinNative: match hidclass.sys/pnp.c behaviour to silence the fixme. */
+        status = STATUS_NOT_SUPPORTED;
+        break;
+
     default:
         FIXME("code %#x, not implemented!\n", code);
         status = irp->IoStatus.Status;

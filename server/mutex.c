@@ -35,6 +35,7 @@
 #include "thread.h"
 #include "request.h"
 #include "security.h"
+#include "esync.h"
 
 static const WCHAR mutex_name[] = {'M','u','t','a','n','t'};
 
@@ -57,12 +58,14 @@ struct mutex_sync
     unsigned int        count;              /* recursion count */
     int                 abandoned;          /* has it been abandoned? */
     struct list         entry;              /* entry in owner thread mutex list */
+    int                 esync_fd;           /* WinNative: eventfd for ESYNC clients */
 };
 
 static void mutex_sync_dump( struct object *obj, int verbose );
 static int mutex_sync_signaled( struct object *obj, struct wait_queue_entry *entry );
 static void mutex_sync_satisfied( struct object *obj, struct wait_queue_entry *entry );
 static void mutex_sync_destroy( struct object *obj );
+static int mutex_sync_get_esync_fd( struct object *obj, enum esync_type *type );
 
 static const struct object_ops mutex_sync_ops =
 {
@@ -87,7 +90,16 @@ static const struct object_ops mutex_sync_ops =
     no_kernel_obj_list,        /* get_kernel_obj_list */
     no_close_handle,           /* close_handle */
     mutex_sync_destroy,        /* destroy */
+    mutex_sync_get_esync_fd,   /* get_esync_fd */
 };
+
+static int mutex_sync_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct mutex_sync *mutex = (struct mutex_sync *)obj;
+    assert( obj->ops == &mutex_sync_ops );
+    if (type) *type = ESYNC_MUTEX;
+    return mutex->esync_fd;
+}
 
 /* grab a mutex for a given thread */
 static void do_grab( struct mutex_sync *mutex, struct thread *thread )
@@ -100,6 +112,10 @@ static void do_grab( struct mutex_sync *mutex, struct thread *thread )
         grab_object( mutex );
         mutex->owner = thread;
         list_add_head( &thread->mutex_list, &mutex->entry );
+        /* WinNative: mutex is now owned -> ESYNC clients must see it as
+         * non-signaled. Drain the eventfd count. */
+        if (do_esync() && mutex->esync_fd != -1)
+            esync_clear( mutex->esync_fd );
     }
 }
 
@@ -117,6 +133,11 @@ static int do_release( struct mutex_sync *mutex, struct thread *thread, int coun
         list_remove( &mutex->entry );
         mutex->owner = NULL;
         wake_up( &mutex->obj, 0 );
+        /* WinNative: mutex is now free -> notify ESYNC clients via eventfd so
+         * waiters on this kernel fd unblock. Without this, ESync clients
+         * blocked in WaitForSingleObject on a mutex never wake. */
+        if (do_esync() && mutex->esync_fd != -1)
+            esync_wake_fd( mutex->esync_fd );
         release_object( mutex );
     }
     return 1;
@@ -134,6 +155,8 @@ static void mutex_sync_destroy( struct object *obj )
     struct mutex_sync *mutex = (struct mutex_sync *)obj;
     assert( obj->ops == &mutex_sync_ops );
     assert( !mutex->count );
+    if (do_esync() && mutex->esync_fd != -1)
+        close( mutex->esync_fd );
 }
 
 static int mutex_sync_signaled( struct object *obj, struct wait_queue_entry *entry )
@@ -163,6 +186,13 @@ static struct object *create_mutex_sync( int owned )
     mutex->count = 0;
     mutex->owner = NULL;
     mutex->abandoned = 0;
+    mutex->esync_fd = -1;
+
+    /* WinNative: allocate an eventfd for ESYNC clients. An unowned mutex is
+     * signaled (initval=1); an owned mutex is non-signaled (initval=0). */
+    if (do_esync())
+        mutex->esync_fd = esync_create_fd( owned ? 0 : 1, 0 );
+
     if (owned) do_grab( mutex, current );
 
     return &mutex->obj;
@@ -178,6 +208,7 @@ static void mutex_dump( struct object *obj, int verbose );
 static struct object *mutex_get_sync( struct object *obj );
 static int mutex_signal( struct object *obj, unsigned int access, int signal );
 static void mutex_destroy( struct object *obj );
+static int mutex_get_esync_fd( struct object *obj, enum esync_type *type );
 
 static const struct object_ops mutex_ops =
 {
@@ -202,7 +233,17 @@ static const struct object_ops mutex_ops =
     no_kernel_obj_list,        /* get_kernel_obj_list */
     no_close_handle,           /* close_handle */
     mutex_destroy,             /* destroy */
+    mutex_get_esync_fd,        /* get_esync_fd */
 };
+
+static int mutex_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct mutex *mutex = (struct mutex *)obj;
+    if (mutex->sync && mutex->sync->ops == &mutex_sync_ops)
+        return mutex_sync_get_esync_fd( mutex->sync, type );
+    if (type) *type = ESYNC_MUTEX;
+    return -1;
+}
 
 static struct mutex *create_mutex( struct object *root, const struct unicode_str *name,
                                    unsigned int attr, int owned, const struct security_descriptor *sd )

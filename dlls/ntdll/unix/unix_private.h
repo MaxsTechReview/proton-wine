@@ -117,6 +117,7 @@ struct ntdll_thread_data
     void                     *param;         /* thread entry point parameter */
     void                     *jmp_buf;       /* setjmp buffer for exception handling */
     int                      *fsync_apc_futex;
+    int                       esync_apc_fd;  /* eventfd for alertable APC wakes — WinNative ESYNC */
 };
 
 C_ASSERT( sizeof(struct ntdll_thread_data) <= sizeof(((TEB *)0)->GdiTebBatch) );

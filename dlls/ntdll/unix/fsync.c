@@ -54,6 +54,9 @@
 
 #include "unix_private.h"
 #include "fsync.h"
+#ifdef __ANDROID__
+#include "../../../android/shm_utils/shm_utils.h"
+#endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(fsync);
 

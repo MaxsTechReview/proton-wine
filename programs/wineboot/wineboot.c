@@ -323,6 +323,25 @@ static UINT64 read_tsc_frequency(void)
     return tsc_frequency;
 }
 
+static void initialize_xstate_features(struct _KUSER_SHARED_DATA *data)
+{
+    XSTATE_CONFIGURATION *xstate = &data->XState;
+
+    xstate->EnabledFeatures = (1 << XSTATE_LEGACY_FLOATING_POINT) | (1 << XSTATE_LEGACY_SSE) | (1 << XSTATE_AVX);
+    xstate->EnabledVolatileFeatures = xstate->EnabledFeatures;
+    xstate->AllFeatureSize = 0x340;
+
+    xstate->OptimizedSave = 0;
+    xstate->CompactionEnabled = 0;
+
+    xstate->Features[0].Size = xstate->AllFeatures[0] = offsetof(XSAVE_FORMAT, XmmRegisters);
+    xstate->Features[1].Size = xstate->AllFeatures[1] = sizeof(M128A) * 16;
+    xstate->Features[1].Offset = xstate->Features[0].Size;
+    xstate->Features[2].Offset = 0x240;
+    xstate->Features[2].Size = 0x100;
+    xstate->Size = 0x340;
+}
+
 #else
 
 static UINT64 read_tsc_frequency(void)
@@ -1543,6 +1562,14 @@ static void install_root_pnp_devices(void)
 
     for (i = 0; i < ARRAY_SIZE(root_devices); ++i)
     {
+        /* Skip the root PnP device entirely if its .inf file isn't installed.
+         * wine.inf.in disables winebth on WinNative (Android has no BlueZ/dbus)
+         * but this table is static — registering a device with no inf triggers
+         * ZwLoadDriver c00000e5 on every boot. File-existence gate matches
+         * Wine's packaging model: inf present => driver usable. */
+        if (GetFileAttributesA( root_devices[i].infpath ) == INVALID_FILE_ATTRIBUTES)
+            continue;
+
         if (!SetupDiCreateDeviceInfoA( set, root_devices[i].name, &GUID_NULL, NULL, NULL, 0, &device))
         {
             if (GetLastError() != ERROR_DEVINST_ALREADY_EXISTS)

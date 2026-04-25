@@ -109,6 +109,8 @@ struct object_ops
     int (*close_handle)(struct object *,struct process *,obj_handle_t);
     /* destroy on refcount == 0 */
     void (*destroy)(struct object *);
+    /* return the esync fd for this object */
+    int (*get_esync_fd)(struct object *, enum esync_type *type);
 };
 
 struct object
@@ -286,13 +288,24 @@ static inline int is_machine_32bit( unsigned short machine )
 }
 static inline int is_machine_64bit( unsigned short machine )
 {
-    return machine == IMAGE_FILE_MACHINE_AMD64 || machine == IMAGE_FILE_MACHINE_ARM64;
+    /* WinNative: accept ARM64X hybrid PE (0xA64E) as 64-bit. Wine's builtin
+     * DLLs built with --enable-archs=arm64ec,aarch64 have a hybrid machine
+     * type that carries both ARM64 native code and ARM64EC (x64-ABI) code.
+     * Without this, mapping.c rejects every builtin DLL on ARM64 hosts. */
+    return machine == IMAGE_FILE_MACHINE_AMD64 ||
+           machine == IMAGE_FILE_MACHINE_ARM64 ||
+           machine == IMAGE_FILE_MACHINE_ARM64X;
 }
 static inline int is_machine_supported( unsigned short machine )
 {
     unsigned int i;
     for (i = 0; i < supported_machines_count; i++) if (supported_machines[i] == machine) return 1;
-    if (native_machine == IMAGE_FILE_MACHINE_ARM64) return machine == IMAGE_FILE_MACHINE_AMD64;
+    if (native_machine == IMAGE_FILE_MACHINE_ARM64)
+    {
+        /* ARM64 host accepts AMD64 (via arm64ec/FEX emu) and ARM64X (hybrid) */
+        if (machine == IMAGE_FILE_MACHINE_AMD64) return 1;
+        if (machine == IMAGE_FILE_MACHINE_ARM64X) return 1;
+    }
     return 0;
 }
 

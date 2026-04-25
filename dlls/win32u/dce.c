@@ -590,6 +590,16 @@ W32KAPI struct window_surface *window_surface_get( HWND hwnd )
 W32KAPI void window_surface_lock( struct window_surface *surface )
 {
     if (surface == &dummy_surface) return;
+    /* Pin the surface across the locked region: window_surface_release()
+     * destroys surface->mutex on the last ref drop, but reaching this
+     * function only requires that the caller hold *some* path to the
+     * pointer -- it does not require an owned ref. Without this transient
+     * ref a parallel release on another thread can destroy the mutex
+     * between the caller obtaining `surface` and the lock acquire below
+     * (POSIX leaves this undefined; Bionic makes it a fortify abort and
+     * any libc that recycles the underlying memory races silently). Take
+     * a ref before the lock, release it after the unlock. */
+    window_surface_add_ref( surface );
     pthread_mutex_lock( &surface->mutex );
 }
 
@@ -597,6 +607,7 @@ W32KAPI void window_surface_unlock( struct window_surface *surface )
 {
     if (surface == &dummy_surface) return;
     pthread_mutex_unlock( &surface->mutex );
+    window_surface_release( surface );
 }
 
 void *window_surface_get_color( struct window_surface *surface, BITMAPINFO *info )

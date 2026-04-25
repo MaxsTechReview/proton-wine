@@ -82,6 +82,7 @@
 #include "ddk/wdm.h"
 
 #include "fsync.h"
+#include "esync.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(server);
 WINE_DECLARE_DEBUG_CHANNEL(syscall);
@@ -1360,9 +1361,16 @@ static int setup_config_dir(void)
 
     if (!mkdir( "dosdevices", 0777 ))
     {
+#ifdef __ANDROID__
+        mkdir( "drive_d", 0777 );
+        symlink( "../drive_c", "dosdevices/c:" );
+        symlink( "/storage/emulated/0/", "dosdevices/d:" );
+        symlink( "/data/data/com.winnative.cmod/files/imagefs/", "dosdevices/z:" );
+#else
         mkdir( "drive_c", 0777 );
         symlink( "../drive_c", "dosdevices/c:" );
         symlink( "/", "dosdevices/z:" );
+#endif
     }
     else if (errno != EEXIST) fatal_perror( "cannot create %s/dosdevices", config_dir );
 
@@ -1713,6 +1721,8 @@ size_t server_init_process(void)
     SERVER_END_REQ;
     close( reply_pipe );
 
+    esync_init();
+
     if (ret) server_protocol_error( "init_first_thread failed with status %x\n", ret );
 
     if (!supported_machines_count)
@@ -1961,6 +1971,9 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
      * retrieve it again */
     fd = remove_fd_from_cache( handle );
     close_inproc_sync( handle );
+
+    if (do_esync())
+        esync_close( handle );
 
     SERVER_START_REQ( close_handle )
     {

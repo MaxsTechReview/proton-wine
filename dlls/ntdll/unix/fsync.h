@@ -43,5 +43,9 @@ extern pthread_mutex_t fd_cache_mutex;
 extern int fsync_enabled;
 static inline int do_fsync(void)
 {
-    return fsync_enabled;
+    /* WinNative: FSync disabled unconditionally. Most Android kernels ship <5.16
+     * which lacks futex_waitv, so FSync silently deadlocks or falls back in
+     * unpredictable ways. Hard-force 0 so the fallback chain stays ESYNC → NTSync
+     * → wineserver. WINEFSYNC env var is ignored on purpose. */
+    return 0;
 }

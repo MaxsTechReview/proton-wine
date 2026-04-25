@@ -46,6 +46,17 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 #define QS_HARDWARE     0x40000000
 #define QS_INTERNAL     (QS_DRIVER | QS_HARDWARE)
 
+static int wn_sync_trace_enabled(void)
+{
+    static int cached = -1;
+    if (cached == -1)
+    {
+        const char *e = getenv( "WN_SYNC_TRACE" );
+        cached = e && atoi( e ) > 0;
+    }
+    return cached;
+}
+
 static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
 
 static LONG atomic_load_long( const volatile LONG *ptr )
@@ -3451,8 +3462,19 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
     process_driver_events( QS_ALLINPUT, wake_mask, changed_mask );
     if (!(changed_mask & QS_SMRESULT) && (event = get_user_thread_info()->idle_event)) NtSetEvent( event, NULL );
 
-    do ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
-    while (ret == count - 1 && !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));
+    if (wn_sync_trace_enabled())
+        ERR( "WN_SYNC_TRACE wait_message ENTER count=%u wake_mask=%08x changed_mask=%08x flags=%x type=%d queue_signaled=%d\n",
+             (unsigned)count, (unsigned)wake_mask, (unsigned)changed_mask, (unsigned)flags, (int)type,
+             is_queue_signaled() );
+
+    do
+    {
+        ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
+        if (wn_sync_trace_enabled())
+            ERR( "WN_SYNC_TRACE wait_message NtWait ret=%08x count=%u queue_idx=%u queue_signaled_now=%d\n",
+                 (unsigned)ret, (unsigned)count, (unsigned)(count - 1), is_queue_signaled() );
+        if (ret != count - 1) break;
+    } while (!process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));
 
     if (HIWORD(ret)) /* is it an error code? */
     {

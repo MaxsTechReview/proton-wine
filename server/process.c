@@ -65,6 +65,7 @@
 #include "user.h"
 #include "security.h"
 
+#include "esync.h"
 #include "fsync.h"
 
 /* process object */
@@ -93,6 +94,7 @@ struct type_descr process_type =
 
 static void process_dump( struct object *obj, int verbose );
 static struct object *process_get_sync( struct object *obj );
+static int process_get_esync_fd( struct object *obj, enum esync_type *type );
 static unsigned int process_map_access( struct object *obj, unsigned int access );
 static struct security_descriptor *process_get_sd( struct object *obj );
 static void process_poll_event( struct fd *fd, int event );
@@ -123,7 +125,8 @@ static const struct object_ops process_ops =
     no_open_file,                /* open_file */
     process_get_kernel_obj_list, /* get_kernel_obj_list */
     no_close_handle,             /* close_handle */
-    process_destroy              /* destroy */
+    process_destroy,             /* destroy */
+    process_get_esync_fd,        /* get_esync_fd */
 };
 
 static const struct fd_ops process_fd_ops =
@@ -153,6 +156,7 @@ struct startup_info
 static void startup_info_dump( struct object *obj, int verbose );
 static struct object *startup_info_get_sync( struct object *obj );
 static void startup_info_destroy( struct object *obj );
+static int startup_info_get_esync_fd( struct object *obj, enum esync_type *type );
 
 static const struct object_ops startup_info_ops =
 {
@@ -176,8 +180,23 @@ static const struct object_ops startup_info_ops =
     no_open_file,                  /* open_file */
     no_kernel_obj_list,            /* get_kernel_obj_list */
     no_close_handle,               /* close_handle */
-    startup_info_destroy           /* destroy */
+    startup_info_destroy,          /* destroy */
+    startup_info_get_esync_fd,     /* get_esync_fd */
 };
+
+/* WinNative: redirect to wrapper->sync's esync_fd so parent's wait on the
+ * process-ready event actually unblocks when the new process signals init.
+ * Without this, CreateProcess of an ARM64EC helper hangs on ESYNC — parent
+ * is waiting on an eventfd that nothing writes to, since signal_sync on the
+ * event_sync does fire but the startup_info wrapper's callback is NULL. */
+static int startup_info_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct startup_info *info = (struct startup_info *)obj;
+    int fd = sync_get_esync_fd( info->sync, type );
+    if (fd != -1) return fd;
+    if (type) *type = ESYNC_AUTO_SERVER;
+    return -1;
+}
 
 /* job object */
 
@@ -199,6 +218,7 @@ static void job_dump( struct object *obj, int verbose );
 static struct object *job_get_sync( struct object *obj );
 static int job_close_handle( struct object *obj, struct process *process, obj_handle_t handle );
 static void job_destroy( struct object *obj );
+static int job_get_esync_fd( struct object *obj, enum esync_type *type );
 
 struct job
 {
@@ -238,8 +258,22 @@ static const struct object_ops job_ops =
     no_open_file,                  /* open_file */
     no_kernel_obj_list,            /* get_kernel_obj_list */
     job_close_handle,              /* close_handle */
-    job_destroy                    /* destroy */
+    job_destroy,                   /* destroy */
+    job_get_esync_fd,              /* get_esync_fd */
 };
+
+/* WinNative: job object needs ESYNC wiring so waits on job termination unblock.
+ * Without this, rundll32 or any child spawned in a job object that's waited
+ * on by parent via JOB_OBJECT_ASSOCIATE_COMPLETION_PORT_INFORMATION never
+ * completes on ESYNC. */
+static int job_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct job *job = (struct job *)obj;
+    int fd = sync_get_esync_fd( job->sync, type );
+    if (fd != -1) return fd;
+    if (type) *type = ESYNC_MANUAL_SERVER;
+    return -1;
+}
 
 static struct job *create_job_object( struct object *root, const struct unicode_str *name,
                                       unsigned int attr, const struct security_descriptor *sd )
@@ -704,6 +738,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->rawinput_mouse  = NULL;
     process->rawinput_kbd    = NULL;
     memset( &process->image_info, 0, sizeof(process->image_info) );
+    process->esync_fd        = -1;
     process->cpu_override.cpu_count = 0;
     list_init( &process->rawinput_entry );
     list_init( &process->kernel_object );
@@ -759,6 +794,9 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     }
     if (!process->handles || !process->token) goto error;
     process->session_id = token_get_session_id( process->token );
+
+    if (do_esync())
+        process->esync_fd = esync_create_fd( 0, 0 );
 
     set_fd_events( process->msg_fd, POLLIN );  /* start listening to events */
 
@@ -822,6 +860,7 @@ static void process_destroy( struct object *obj )
     if (process->token) release_object( process->token );
     if (process->sync) release_object( process->sync );
     if (do_fsync()) fsync_cleanup_process_shm_indices( process->id );
+    if (do_esync()) close( process->esync_fd );
     list_remove( &process->rawinput_entry );
     free( process->rawinput_devices );
     free( process->dir_cache );
@@ -842,6 +881,16 @@ static struct object *process_get_sync( struct object *obj )
     struct process *process = (struct process *)obj;
     assert( obj->ops == &process_ops );
     return grab_object( process->sync );
+}
+
+static int process_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct process *process = (struct process *)obj;
+    /* WinNative: route through sync's esync_fd; falls back to own fd */
+    int fd = sync_get_esync_fd( process->sync, type );
+    if (fd != -1) return fd;
+    *type = ESYNC_MANUAL_SERVER;
+    return process->esync_fd;
 }
 
 static unsigned int process_map_access( struct object *obj, unsigned int access )

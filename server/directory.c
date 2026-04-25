@@ -37,6 +37,7 @@
 #include "process.h"
 #include "file.h"
 #include "unicode.h"
+#include "esync.h"
 
 #define HASH_SIZE 7  /* default hash size */
 
@@ -83,7 +84,8 @@ static const struct object_ops object_type_ops =
     no_open_file,                 /* open_file */
     no_kernel_obj_list,           /* get_kernel_obj_list */
     no_close_handle,              /* close_handle */
-    no_destroy                    /* destroy */
+    no_destroy,                   /* destroy */
+    NULL,                         /* get_esync_fd */
 };
 
 
@@ -134,7 +136,8 @@ static const struct object_ops directory_ops =
     no_open_file,                 /* open_file */
     no_kernel_obj_list,           /* get_kernel_obj_list */
     no_close_handle,              /* close_handle */
-    directory_destroy             /* destroy */
+    directory_destroy,            /* destroy */
+    NULL,                         /* get_esync_fd */
 };
 
 static struct directory *root_directory;
@@ -490,7 +493,12 @@ void init_directories( struct fd *intl_fd )
 
     /* events */
     for (i = 0; i < ARRAY_SIZE( kernel_events ); i++)
-        release_object( create_event( &dir_kernel->obj, &kernel_events[i], OBJ_PERMANENT, 1, 0, NULL ));
+    {
+        if (do_esync())
+            release_object( create_esync( &dir_kernel->obj, &kernel_events[i], OBJ_PERMANENT, 0, 0, ESYNC_MANUAL_EVENT, NULL ));
+        else
+            release_object( create_event( &dir_kernel->obj, &kernel_events[i], OBJ_PERMANENT, 1, 0, NULL ));
+    }
     release_object( create_keyed_event( &dir_kernel->obj, &keyed_event_crit_sect_str, OBJ_PERMANENT, NULL ));
 
     /* mappings */

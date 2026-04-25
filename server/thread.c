@@ -61,6 +61,7 @@
 #include "user.h"
 #include "security.h"
 
+#include "esync.h"
 #include "fsync.h"
 
 /* thread queues */
@@ -123,7 +124,8 @@ static const struct object_ops thread_apc_ops =
     no_open_file,               /* open_file */
     no_kernel_obj_list,         /* get_kernel_obj_list */
     no_close_handle,            /* close_handle */
-    thread_apc_destroy          /* destroy */
+    thread_apc_destroy,         /* destroy */
+    NULL,                       /* get_esync_fd */
 };
 
 
@@ -169,6 +171,7 @@ static const struct object_ops context_ops =
     no_kernel_obj_list,         /* get_kernel_obj_list */
     no_close_handle,            /* close_handle */
     context_destroy,            /* destroy */
+    NULL,                       /* get_esync_fd */
 };
 
 
@@ -191,6 +194,7 @@ struct type_descr thread_type =
 
 static void dump_thread( struct object *obj, int verbose );
 static struct object *thread_get_sync( struct object *obj );
+static int thread_get_esync_fd( struct object *obj, enum esync_type *type );
 static unsigned int thread_map_access( struct object *obj, unsigned int access );
 static void thread_poll_event( struct fd *fd, int event );
 static struct list *thread_get_kernel_obj_list( struct object *obj );
@@ -218,7 +222,8 @@ static const struct object_ops thread_ops =
     no_open_file,               /* open_file */
     thread_get_kernel_obj_list, /* get_kernel_obj_list */
     no_close_handle,            /* close_handle */
-    destroy_thread              /* destroy */
+    destroy_thread,             /* destroy */
+    thread_get_esync_fd,        /* get_esync_fd */
 };
 
 static const struct fd_ops thread_fd_ops =
@@ -419,6 +424,8 @@ static inline void init_thread_structure( struct thread *thread )
     thread->wait_fd         = NULL;
     thread->state           = RUNNING;
     thread->exit_code       = 0;
+    thread->esync_fd        = -1;
+    thread->esync_apc_fd    = -1;
     thread->priority        = 0;
     thread->base_priority   = 0;
     thread->disable_boost   = 0;
@@ -567,6 +574,12 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
     if (!(thread->sync = create_internal_sync( 1, 0 ))) goto error;
     if (get_inproc_device_fd() >= 0 && !(thread->alert_sync = create_inproc_internal_sync( 1, 0 ))) goto error;
 
+    if (do_esync())
+    {
+        thread->esync_fd = esync_create_fd( 0, 0 );
+        thread->esync_apc_fd = esync_create_fd( 0, 0 );
+    }
+
     if (process->desktop)
     {
         if (!(desktop = get_desktop_obj( process, process->desktop, 0 ))) clear_error();  /* ignore errors */
@@ -626,6 +639,11 @@ static void cleanup_thread( struct thread *thread )
     if (thread->request_fd) release_object( thread->request_fd );
     if (thread->reply_fd) release_object( thread->reply_fd );
     if (thread->wait_fd) release_object( thread->wait_fd );
+    if (do_esync())
+    {
+        close( thread->esync_fd );
+        close( thread->esync_apc_fd );
+    }
     cleanup_clipboard_thread(thread);
     destroy_thread_windows( thread );
     free_msg_queue( thread );
@@ -679,6 +697,16 @@ static struct object *thread_get_sync( struct object *obj )
     struct thread *thread = (struct thread *)obj;
     assert( obj->ops == &thread_ops );
     return grab_object( thread->sync );
+}
+
+static int thread_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct thread *thread = (struct thread *)obj;
+    /* WinNative: route through sync's esync_fd; falls back to own fd */
+    int fd = sync_get_esync_fd( thread->sync, type );
+    if (fd != -1) return fd;
+    *type = ESYNC_MANUAL_SERVER;
+    return thread->esync_fd;
 }
 
 static unsigned int thread_map_access( struct object *obj, unsigned int access )
@@ -1415,6 +1443,17 @@ void wake_up( struct object *obj, int max )
     struct list *ptr;
     int ret;
 
+    /* WinNative: mixed waits (esync + server objects in one WaitForMultipleObjects)
+     * require that server-side object changes ALSO write to their eventfd, so
+     * client waiters polling on that fd can detect the state change. Without
+     * this bridge, clients holding e.g. an event handle (now server-sync after
+     * event_ops.get_esync_fd = NULL) + a mutex handle (esync-sync) would miss
+     * event signals inside esync_wait_objects. The fd-guard inside
+     * esync_wake_fd handles -1/garbage safely so this dispatch is idempotent
+     * for objects whose callback returns -1. */
+    if (do_esync())
+        esync_wake_up( obj );
+
     LIST_FOR_EACH( ptr, &obj->wait_queue )
     {
         struct wait_queue_entry *entry = LIST_ENTRY( ptr, struct wait_queue_entry, entry );
@@ -1502,6 +1541,9 @@ static int queue_apc( struct process *process, struct thread *thread, struct thr
         if (apc->call.type == APC_USER && thread->alert_sync)
             signal_inproc_sync( thread->alert_sync );
         wake_thread( thread );
+
+        if (do_esync() && queue == &thread->user_apc)
+            esync_wake_fd( thread->esync_apc_fd );
     }
 
     return 1;
@@ -1553,6 +1595,10 @@ static struct thread_apc *thread_dequeue_apc( struct thread *thread, int system 
         if (list_empty( &thread->user_apc ) && thread->alert_sync)
             reset_inproc_sync( thread->alert_sync );
     }
+
+    if (do_esync() && list_empty( &thread->system_apc ) && list_empty( &thread->user_apc ))
+        esync_clear( thread->esync_apc_fd );
+
     return apc;
 }
 
@@ -1648,6 +1694,8 @@ void kill_thread( struct thread *thread, int violent_death )
     }
     kill_console_processes( thread, 0 );
     abandon_mutexes( thread );
+    if (do_esync())
+        esync_abandon_mutexes( thread );
     signal_sync( thread->sync );
     if (violent_death) send_thread_signal( thread, SIGQUIT );
     cleanup_thread( thread );

@@ -41,6 +41,7 @@
 #include "wincon.h"
 #include "winternl.h"
 #include "wine/condrv.h"
+#include "esync.h"
 
 struct screen_buffer;
 
@@ -97,7 +98,8 @@ static const struct object_ops console_ops =
     console_open_file,                /* open_file */
     no_kernel_obj_list,               /* get_kernel_obj_list */
     no_close_handle,                  /* close_handle */
-    console_destroy                   /* destroy */
+    console_destroy,                  /* destroy */
+    NULL,                             /* get_esync_fd */
 };
 
 static enum server_fd_type console_get_fd_type( struct fd *fd );
@@ -143,10 +145,12 @@ struct console_server
     unsigned int          once_input : 1; /* flag if input thread has already been requested */
     int                   term_fd;        /* UNIX terminal fd */
     struct termios        termios;        /* original termios */
+    int                   esync_fd;       /* esync file descriptor */
 };
 
 static void console_server_dump( struct object *obj, int verbose );
 static void console_server_destroy( struct object *obj );
+static int console_server_get_esync_fd( struct object *obj, enum esync_type *type );
 static struct fd *console_server_get_fd( struct object *obj );
 static struct object *console_server_get_sync( struct object *obj );
 static struct object *console_server_lookup_name( struct object *obj, struct unicode_str *name,
@@ -176,7 +180,8 @@ static const struct object_ops console_server_ops =
     console_server_open_file,         /* open_file */
     no_kernel_obj_list,               /* get_kernel_obj_list */
     no_close_handle,                  /* close_handle */
-    console_server_destroy            /* destroy */
+    console_server_destroy,           /* destroy */
+    console_server_get_esync_fd,      /* get_esync_fd */
 };
 
 static void console_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *async );
@@ -247,7 +252,8 @@ static const struct object_ops screen_buffer_ops =
     screen_buffer_open_file,          /* open_file */
     no_kernel_obj_list,               /* get_kernel_obj_list */
     no_close_handle,                  /* close_handle */
-    screen_buffer_destroy             /* destroy */
+    screen_buffer_destroy,            /* destroy */
+    NULL,                             /* get_esync_fd */
 };
 
 static void screen_buffer_write( struct fd *fd, struct async *async, file_pos_t pos );
@@ -297,7 +303,8 @@ static const struct object_ops console_device_ops =
     console_device_open_file,         /* open_file */
     no_kernel_obj_list,               /* get_kernel_obj_list */
     no_close_handle,                  /* close_handle */
-    no_destroy                        /* destroy */
+    no_destroy,                       /* destroy */
+    NULL,                             /* get_esync_fd */
 };
 
 struct console_input
@@ -338,7 +345,8 @@ static const struct object_ops console_input_ops =
     console_input_open_file,          /* open_file */
     no_kernel_obj_list,               /* get_kernel_obj_list */
     no_close_handle,                  /* close_handle */
-    console_input_destroy             /* destroy */
+    console_input_destroy,            /* destroy */
+    NULL,                             /* get_esync_fd */
 };
 
 static void console_input_read( struct fd *fd, struct async *async, file_pos_t pos );
@@ -399,7 +407,8 @@ static const struct object_ops console_output_ops =
     console_output_open_file,         /* open_file */
     no_kernel_obj_list,               /* get_kernel_obj_list */
     no_close_handle,                  /* close_handle */
-    console_output_destroy            /* destroy */
+    console_output_destroy,           /* destroy */
+    NULL,                             /* get_esync_fd */
 };
 
 static void console_output_write( struct fd *fd, struct async *async, file_pos_t pos );
@@ -458,7 +467,8 @@ static const struct object_ops console_connection_ops =
     console_connection_open_file,     /* open_file */
     no_kernel_obj_list,               /* get_kernel_obj_list */
     console_connection_close_handle,  /* close_handle */
-    console_connection_destroy        /* destroy */
+    console_connection_destroy,       /* destroy */
+    NULL,                             /* get_esync_fd */
 };
 
 static void console_connection_ioctl( struct fd *fd, ioctl_code_t code, struct async *async );
@@ -902,6 +912,16 @@ static void console_server_destroy( struct object *obj )
     disconnect_console_server( server );
     if (server->sync) release_object( server->sync );
     if (server->fd) release_object( server->fd );
+    if (do_esync()) close( server->esync_fd );
+}
+
+static int console_server_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct console_server *server = (struct console_server *)obj;
+    int fd = sync_get_esync_fd( server->sync, type );
+    if (fd != -1) return fd;
+    *type = ESYNC_MANUAL_SERVER;
+    return server->esync_fd;
 }
 
 static struct object *console_server_lookup_name( struct object *obj, struct unicode_str *name,
@@ -937,6 +957,8 @@ static struct object *console_server_lookup_name( struct object *obj, struct uni
         server->console->server = server;
 
         if (list_empty( &server->queue )) reset_sync( server->sync );
+        if (do_esync() && list_empty( &server->queue ))
+            esync_clear( server->esync_fd );
         return &server->console->obj;
     }
 
@@ -974,12 +996,15 @@ static struct object *create_console_server( void )
     server->busy       = 0;
     server->once_input = 0;
     server->term_fd    = -1;
+    server->esync_fd   = -1;
     list_init( &server->queue );
     list_init( &server->read_queue );
 
     if (!(server->sync = create_internal_sync( 1, 1 ))) goto error;
     if (!(server->fd = alloc_pseudo_fd( &console_server_fd_ops, &server->obj, FILE_SYNCHRONOUS_IO_NONALERT ))) goto error;
     allow_fd_caching(server->fd);
+    if (do_esync())
+        server->esync_fd = esync_create_fd( 0, 0 );
     return &server->obj;
 
 error:
@@ -1694,5 +1719,7 @@ DECL_HANDLER(get_next_console_request)
 
 done:
     if (list_empty( &server->queue )) reset_sync( server->sync );
+    if (do_esync() && list_empty( &server->queue ))
+        esync_clear( server->esync_fd );
     release_object( server );
 }

@@ -204,6 +204,9 @@ const char * const X11DRV_atom_names[NB_XATOMS - FIRST_XATOM] =
     "text/rtf",
     "text/richtext",
     "text/uri-list",
+#ifdef __ANDROID__
+    "_NET_WM_HWND",
+#endif
     "GAMESCOPE_XALIA_OVERLAY",
     "GAMESCOPE_DISPLAY_EDID_PATH",
 };
@@ -761,7 +764,9 @@ static NTSTATUS x11drv_init( void *arg )
 #ifdef SONAME_LIBXCOMPOSITE
     X11DRV_XComposite_Init();
 #endif
+#ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
     x11drv_xinput2_load();
+#endif
 
     XkbUseExtension( gdi_display, NULL, NULL );
     X11DRV_InitKeyboard( gdi_display );

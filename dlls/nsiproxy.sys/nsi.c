@@ -190,10 +190,16 @@ static NTSTATUS add_notification( const NPI_MODULEID *module, UINT32 table )
 static NTSTATUS poll_events(void)
 {
     static int netlink_fd = -1;
+    static int netlink_unavailable = 0;
     char buffer[PIPE_BUF];
     struct nlmsghdr *nlh;
     NTSTATUS status;
     int len;
+
+    /* Android sandboxes block netlink multicast bind with EACCES/EPERM.
+     * Cache that state after the first attempt and fail fast — retrying
+     * every poll cycle just spams the log. */
+    if (netlink_unavailable) return STATUS_NOT_IMPLEMENTED;
 
     if (netlink_fd == -1)
     {
@@ -201,7 +207,11 @@ static NTSTATUS poll_events(void)
 
         if ((netlink_fd = socket( PF_NETLINK, SOCK_RAW, NETLINK_ROUTE )) == -1)
         {
-            ERR( "netlink socket creation failed, errno %d.\n", errno );
+            if (errno == EACCES || errno == EPERM)
+                WARN( "netlink socket disabled by sandbox (errno %d) — nsi events unavailable.\n", errno );
+            else
+                ERR( "netlink socket creation failed, errno %d.\n", errno );
+            netlink_unavailable = 1;
             return STATUS_NOT_IMPLEMENTED;
         }
 
@@ -210,9 +220,14 @@ static NTSTATUS poll_events(void)
         addr.nl_groups = RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR;
         if (bind( netlink_fd, (struct sockaddr *)&addr, sizeof(addr) ) == -1)
         {
+            int saved_errno = errno;
             close( netlink_fd );
             netlink_fd = -1;
-            ERR( "bind failed, errno %d.\n", errno );
+            netlink_unavailable = 1;
+            if (saved_errno == EACCES || saved_errno == EPERM)
+                WARN( "netlink bind denied by sandbox (errno %d) — nsi events unavailable.\n", saved_errno );
+            else
+                ERR( "bind failed, errno %d.\n", saved_errno );
             return STATUS_NOT_IMPLEMENTED;
         }
     }

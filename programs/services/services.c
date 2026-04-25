@@ -459,6 +459,30 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
             services_list[delayed_cnt++] = service;
             continue;
         }
+        /* Skip kernel drivers whose image file doesn't exist — common on
+         * Android/WinNative where a prefixPack was baked with drivers (e.g.
+         * winebth) that are not shipped in the Wine install. Attempting to
+         * start them yields ZwLoadDriver c00000e5 noise on every boot. Also
+         * unconditionally skip winebth: Android has no BlueZ/dbus so its
+         * unixlib init always fails; there is no scenario where this driver
+         * can succeed under Wine-on-Android. */
+        if (service->config.dwServiceType & SERVICE_DRIVER)
+        {
+            const WCHAR *img = service->config.lpBinaryPathName;
+            if (service->name && !wcsicmp( service->name, L"winebth" ))
+            {
+                TRACE("skipping autostart of winebth (no Bluetooth on this platform)\n");
+                release_service(service);
+                continue;
+            }
+            if (img && img[0] && GetFileAttributesW( img ) == INVALID_FILE_ATTRIBUTES)
+            {
+                TRACE("skipping autostart of driver %s: image %s missing\n",
+                      wine_dbgstr_w(service->name), wine_dbgstr_w(img));
+                release_service(service);
+                continue;
+            }
+        }
         err = service_start(service, 0, NULL);
         if (err != ERROR_SUCCESS)
             WINE_FIXME("Auto-start service %s failed to start: %ld\n",

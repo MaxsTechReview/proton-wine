@@ -33,6 +33,7 @@
 #include "request.h"
 #include "process.h"
 #include "handle.h"
+#include "esync.h"
 
 struct async_cancel
 {
@@ -44,6 +45,7 @@ struct async_cancel
 static void async_cancel_dump( struct object *obj, int verbose );
 static struct object *async_cancel_get_sync( struct object *obj );
 static void async_cancel_destroy( struct object *obj );
+static int async_cancel_get_esync_fd( struct object *obj, enum esync_type *type );
 
 static const struct object_ops async_cancel_ops =
 {
@@ -67,8 +69,18 @@ static const struct object_ops async_cancel_ops =
     no_open_file,                /* open_file */
     no_kernel_obj_list,          /* get_kernel_obj_list */
     no_close_handle,             /* close_handle */
-    async_cancel_destroy         /* destroy */
+    async_cancel_destroy,        /* destroy */
+    async_cancel_get_esync_fd    /* get_esync_fd */
 };
+
+static int async_cancel_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct async_cancel *cancel = (struct async_cancel *)obj;
+    int fd = sync_get_esync_fd( cancel->sync, type );
+    if (fd != -1) return fd;
+    if (type) *type = ESYNC_MANUAL_SERVER;
+    return -1;
+}
 
 static void async_cancel_dump( struct object *obj, int verbose )
 {

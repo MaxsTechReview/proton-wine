@@ -1725,6 +1725,12 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
         FIXME("flags ignored: 0x%08lx\n", sei_tmp.fMask & unsupportedFlags);
     }
 
+    /* WINNATIVE_SHELLDIAG: entry trace for debugging start-menu/explorer
+     * virtual-namespace opens (Computer, Game Controllers, etc). */
+    TRACE("WINNATIVE_SHELLDIAG entry mask=0x%08lx verb=%s file=%s parms=%s pidl=%p\n",
+          sei_tmp.fMask, debugstr_w(sei_tmp.lpVerb), debugstr_w(sei_tmp.lpFile),
+          debugstr_w(sei_tmp.lpParameters), sei_tmp.lpIDList);
+
     /* process the IDList */
     if (sei_tmp.fMask & SEE_MASK_IDLIST)
     {
@@ -1732,9 +1738,11 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
 
 	HRESULT hr = SHBindToParent(sei_tmp.lpIDList, &IID_IShellExecuteHookW, (LPVOID*)&pSEH, NULL);
 
+	TRACE("WINNATIVE_SHELLDIAG SHBindToParent(ExecuteHookW) hr=0x%08lx\n", hr);
 	if (SUCCEEDED(hr))
 	{
 	    hr = IShellExecuteHookW_Execute(pSEH, &sei_tmp);
+	    TRACE("WINNATIVE_SHELLDIAG ExecuteHookW.Execute hr=0x%08lx\n", hr);
 
 	    IShellExecuteHookW_Release(pSEH);
 
@@ -1749,7 +1757,7 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
 	}
 
         SHGetPathFromIDListW(sei_tmp.lpIDList, wszApplicationName);
-        TRACE("-- idlist=%p (%s)\n", sei_tmp.lpIDList, debugstr_w(wszApplicationName));
+        TRACE("WINNATIVE_SHELLDIAG SHGetPathFromIDListW -> %s\n", debugstr_w(wszApplicationName));
     }
 
     if (sei_tmp.fMask & SEE_MASK_DOENVSUBST)
@@ -1776,21 +1784,28 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
         sei_tmp.lpDirectory = wszDir = tmp;
     }
 
-    if ( ERROR_SUCCESS == ShellExecute_FromContextMenu( &sei_tmp ) )
     {
-        sei->hInstApp = (HINSTANCE) 33;
-        free(wszApplicationName);
-        if (wszParameters != parametersBuffer)
-            free(wszParameters);
-        if (wszDir != dirBuffer)
-            free(wszDir);
-        return TRUE;
+        DWORD _fcmrc = ShellExecute_FromContextMenu( &sei_tmp );
+        TRACE("WINNATIVE_SHELLDIAG ShellExecute_FromContextMenu rc=0x%08lx file=%s\n",
+              _fcmrc, debugstr_w(wszApplicationName));
+        if ( ERROR_SUCCESS == _fcmrc )
+        {
+            sei->hInstApp = (HINSTANCE) 33;
+            free(wszApplicationName);
+            if (wszParameters != parametersBuffer)
+                free(wszParameters);
+            if (wszDir != dirBuffer)
+                free(wszDir);
+            return TRUE;
+        }
     }
 
     if (sei_tmp.fMask & SEE_MASK_CLASSALL)
     {
         retval = SHELL_execute_class( wszApplicationName, &sei_tmp, sei,
                                       execfunc );
+        TRACE("WINNATIVE_SHELLDIAG SHELL_execute_class retval=%Iu file=%s\n",
+              (UINT_PTR)retval, debugstr_w(wszApplicationName));
         if (retval <= 32 && !(sei_tmp.fMask & SEE_MASK_FLAG_NO_UI))
             do_error_dialog(retval, sei_tmp.hwnd);
         free(wszApplicationName);
@@ -1952,7 +1967,8 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
     }
 
 end:
-    TRACE("retval %Iu\n", retval);
+    TRACE("WINNATIVE_SHELLDIAG end retval=%Iu (>32=%d) file=%s verb=%s\n",
+          retval, retval > 32, debugstr_w(wszApplicationName), debugstr_w(sei_tmp.lpVerb));
 
     free(wszApplicationName);
     if (wszParameters != parametersBuffer)

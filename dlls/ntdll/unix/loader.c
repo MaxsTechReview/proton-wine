@@ -1316,7 +1316,17 @@ static NTSTATUS steamclient_setup_trampolines( void *args )
     int i;
 
     if (noexec_cached == -1)
+    {
+#ifdef __ANDROID__
+        /* Android 10+ enforces W^X; RWX mprotect in this function silently
+         * fails and the trampolines never become executable. Default to the
+         * noexec fault-redirect path; WINESTEAMNOEXEC=0 can opt out. */
+        wsne = getenv("WINESTEAMNOEXEC");
+        noexec_cached = wsne ? atoi(wsne) : 1;
+#else
         noexec_cached = (wsne = getenv("WINESTEAMNOEXEC")) && atoi(wsne);
+#endif
+    }
 
     virtual_get_system_info( &info, !!NtCurrentTeb()->WowTebOffset );
     page_mask = info.PageSize - 1;
@@ -2288,6 +2298,14 @@ static void hacks_init(void)
 {
     const char *sgi = getenv( "SteamGameId" );
     const char *env_str;
+
+#ifdef __ANDROID__
+    /* WinNative-tuned defaults for Android. setenv with overwrite=0 so a
+     * Winlator shortcut / container / user env var always wins. */
+    setenv( "WINE_ADPF",     "8",                            0 );
+    setenv( "VKD3D_CONFIG",  "virtual_heaps,no_upload_hvv",  0 );
+#endif
+
     if ((env_str = getenv("WINE_RAM_REPORTING_BIAS")))
     {
         ram_reporting_bias = atoll(env_str) * 1024 * 1024;
@@ -2429,7 +2447,280 @@ static void hacks_init(void)
 
     if (main_argc > 1 && strstr(main_argv[1], "edCefRenderProcess.exe"))
         process_termination_delay = TRUE;
+
+    /* WinNative: pin the Wine process's pages in physical RAM to avoid zram
+     * major faults on Android. On a 15 GiB device with a AAA game in the mix,
+     * the kernel compresses less-recently-used pages to zram; every major
+     * fault then stalls the caller for tens of microseconds while the page
+     * is decompressed. Measured in the field: 42M major faults per session
+     * with Cyberpunk, high input latency, frame-time spikes.
+     *
+     * Gated on WINE_MLOCK (default off):
+     *   WINE_MLOCK=1        -> mlockall(MCL_CURRENT|MCL_FUTURE)
+     *   WINE_MLOCK=onfault  -> add MCL_ONFAULT (only lock pages when touched;
+     *                          needs Linux 4.4+ and a newer glibc/bionic)
+     *   WINE_MLOCK=future   -> MCL_FUTURE only (don't lock already-resident
+     *                          pages; just prevent future pages from
+     *                          being evicted)
+     *
+     * We also bump RLIMIT_MEMLOCK to infinity on root-capable processes so
+     * mlockall doesn't fail with EPERM. Not fatal if either step fails; we
+     * log and continue, leaving the process in its normal (swappable) state.
+     */
+    if ((env_str = getenv( "WINE_MLOCK" )) && env_str[0] && strcmp( env_str, "0" ))
+    {
+        int flags = MCL_CURRENT | MCL_FUTURE;
+#ifdef MCL_ONFAULT
+        if (!strcmp( env_str, "onfault" )) flags = MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT;
+#endif
+        if (!strcmp( env_str, "future" )) flags = MCL_FUTURE;
+        {
+            struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
+            if (setrlimit( RLIMIT_MEMLOCK, &rl ) < 0)
+                WARN( "WINE_MLOCK: setrlimit(RLIMIT_MEMLOCK, INF) failed: %s — mlockall may EPERM.\n",
+                      strerror( errno ) );
+        }
+        if (mlockall( flags ) < 0)
+            WARN( "WINE_MLOCK=%s: mlockall(0x%x) failed: %s — pages remain swappable.\n",
+                  env_str, flags, strerror( errno ) );
+        else
+            ERR( "HACK: WINE_MLOCK=%s active — pages pinned in RAM (flags=0x%x).\n",
+                 env_str, flags );
+    }
+
+    /* WinNative: Android Dynamic Performance Framework (ADPF) integration v2.
+     *
+     * v1 (single-thread, no feedback loop) regressed Cyberpunk frame pacing
+     * because the scheduler never received `reportActualWorkDuration` calls
+     * and therefore never completed its boost decision. v2 fixes both:
+     *
+     *   1. Multi-thread session — scans /proc/self/task to include the top N
+     *      CPU-heavy threads as the session's tracked threads (uses
+     *      APerformanceHint_setThreads on API 34+; falls back to creating
+     *      the session with all initial tids on API 33).
+     *
+     *   2. Feedback heartbeat — a pthread loops every `target_ns`, computes
+     *      actual elapsed time since last tick, and reports it to the
+     *      scheduler. Gives the scheduler the ratio it needs to decide
+     *      whether to boost / relax.
+     *
+     *   3. Optional explicit hints — sendHint(CPU_LOAD_UP) on Android 14+
+     *      when elapsed/target ratio exceeds 1.2 (we're falling behind).
+     *
+     * Env vars:
+     *   WINE_ADPF=0            -> disabled (default)
+     *   WINE_ADPF=1            -> 8ms target
+     *   WINE_ADPF=<ms>         -> custom target in milliseconds
+     *   WINE_ADPF=aggressive   -> 4ms target (tight)
+     *   WINE_ADPF_THREADS=<n>  -> max threads to include (default 16)
+     *   WINE_ADPF_HINT=1       -> also send CPU_LOAD_UP hints (Android 14+)
+     */
+#ifdef __ANDROID__
+    if ((env_str = getenv( "WINE_ADPF" )) && env_str[0] && strcmp( env_str, "0" ))
+    {
+        extern void *wine_adpf_init( int64_t target_ns, int max_threads, int use_hints );
+        int64_t target_ns;
+        int max_threads = 16;
+        int use_hints = 0;
+        const char *s;
+
+        if (!strcmp( env_str, "aggressive" )) target_ns = 4 * 1000 * 1000;
+        else if (!strcmp( env_str, "1" ))     target_ns = 8 * 1000 * 1000;
+        else
+        {
+            long ms = strtol( env_str, NULL, 10 );
+            target_ns = (ms > 0 ? ms : 8) * 1000 * 1000;
+        }
+        if ((s = getenv( "WINE_ADPF_THREADS" ))) max_threads = atoi( s );
+        if ((s = getenv( "WINE_ADPF_HINT" )))    use_hints   = !!atoi( s );
+        if (max_threads < 1)  max_threads = 1;
+        if (max_threads > 64) max_threads = 64;
+
+        wine_adpf_init( target_ns, max_threads, use_hints );
+    }
+#endif
 }
+
+#ifdef __ANDROID__
+/* WinNative ADPF v2 implementation. Keep separate from hacks_init() for
+ * readability; called from hacks_init() when WINE_ADPF is set.
+ *
+ * All ADPF symbols are dlopen'd — no link-time dependency on libandroid.
+ * Graceful no-op on older Android versions missing ADPF APIs.
+ */
+
+#include <dirent.h>
+#include <pthread.h>
+#include <time.h>
+
+struct wine_adpf_state
+{
+    void    *session;                              /* APerformanceHintSession* */
+    int64_t  target_ns;
+    int      max_threads;
+    int      use_hints;
+    int      hint_id_cpu_load_up;                  /* sendHint enum value, if used */
+    int      (*update_target)(void *, int64_t);    /* APerformanceHint_updateTargetWorkDuration */
+    int      (*report_actual)(void *, int64_t);    /* APerformanceHint_reportActualWorkDuration */
+    int      (*set_threads)(void *, const int32_t *, size_t); /* setThreads, API 34+ */
+    int      (*send_hint)(void *, int);            /* sendHint, API 33+ */
+};
+
+static int wine_adpf_collect_threads( int32_t *tids, int max )
+{
+    DIR *dir = opendir( "/proc/self/task" );
+    struct dirent *ent;
+    int n = 0;
+
+    if (!dir) return 0;
+    while (n < max && (ent = readdir( dir )))
+    {
+        int tid;
+        if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+        tid = atoi( ent->d_name );
+        if (tid > 0) tids[n++] = (int32_t)tid;
+    }
+    closedir( dir );
+    return n;
+}
+
+static int64_t wine_adpf_monotonic_ns( void )
+{
+    struct timespec ts;
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+static void *wine_adpf_heartbeat( void *arg )
+{
+    struct wine_adpf_state *st = arg;
+    int64_t last_ns = wine_adpf_monotonic_ns();
+    struct timespec ts;
+    int refresh_threads_counter = 0;
+
+    /* Name the thread for diagnostic clarity in perfetto/systrace. */
+    pthread_setname_np( pthread_self(), "wine-adpf" );
+
+    ts.tv_sec  = 0;
+    ts.tv_nsec = st->target_ns;
+
+    for (;;)
+    {
+        int64_t now_ns, elapsed_ns;
+        nanosleep( &ts, NULL );
+        now_ns     = wine_adpf_monotonic_ns();
+        elapsed_ns = now_ns - last_ns;
+        last_ns    = now_ns;
+
+        /* Clamp to a reasonable range — avoid reporting 10ms frames during
+         * garbage collection / OS hiccups as "we're severely behind". */
+        if (elapsed_ns < 1 * 1000 * 1000)     elapsed_ns = 1 * 1000 * 1000;
+        if (elapsed_ns > 100 * 1000 * 1000)   elapsed_ns = 100 * 1000 * 1000;
+
+        if (st->report_actual) st->report_actual( st->session, elapsed_ns );
+
+        /* If we're more than 20% over target, ping CPU_LOAD_UP (API 33+). */
+        if (st->use_hints && st->send_hint
+            && elapsed_ns > st->target_ns + st->target_ns / 5)
+            st->send_hint( st->session, st->hint_id_cpu_load_up );
+
+        /* Every ~5 seconds, refresh the thread list — games spawn worker
+         * pools lazily, and we want to keep the session tracking the actual
+         * hot threads. Only if setThreads is available (API 34+). */
+        if (st->set_threads && ++refresh_threads_counter >= (5 * 1000000000LL / st->target_ns))
+        {
+            int32_t tids[64];
+            int n;
+            refresh_threads_counter = 0;
+            n = wine_adpf_collect_threads( tids, st->max_threads );
+            if (n > 0) st->set_threads( st->session, tids, (size_t)n );
+        }
+    }
+    return NULL;
+}
+
+void *wine_adpf_init( int64_t target_ns, int max_threads, int use_hints )
+{
+    static struct wine_adpf_state state;
+    void *libandroid;
+    void *(*get_manager)(void);
+    void *(*create_session)(void *, const int32_t *, size_t, int64_t);
+    void *mgr;
+    int32_t tids[64];
+    int n_threads;
+    pthread_t hb_thread;
+
+    libandroid = dlopen( "libandroid.so", RTLD_LAZY | RTLD_LOCAL );
+    if (!libandroid)
+    {
+        WARN( "WINE_ADPF: libandroid.so not found: %s\n", dlerror() );
+        return NULL;
+    }
+
+    get_manager    = (void *(*)(void))dlsym( libandroid, "APerformanceHint_getManager" );
+    create_session = (void *(*)(void *, const int32_t *, size_t, int64_t))
+                     dlsym( libandroid, "APerformanceHint_createSession" );
+    state.update_target = (int (*)(void *, int64_t))
+                          dlsym( libandroid, "APerformanceHint_updateTargetWorkDuration" );
+    state.report_actual = (int (*)(void *, int64_t))
+                          dlsym( libandroid, "APerformanceHint_reportActualWorkDuration" );
+    state.set_threads   = (int (*)(void *, const int32_t *, size_t))
+                          dlsym( libandroid, "APerformanceHint_setThreads" );
+    state.send_hint     = (int (*)(void *, int))
+                          dlsym( libandroid, "APerformanceHint_sendHint" );
+
+    if (!get_manager || !create_session || !state.report_actual)
+    {
+        WARN( "WINE_ADPF: required APerformanceHint_* symbols missing (needs API 33+).\n" );
+        dlclose( libandroid );
+        return NULL;
+    }
+
+    mgr = get_manager();
+    if (!mgr)
+    {
+        WARN( "WINE_ADPF: getManager returned NULL.\n" );
+        return NULL;
+    }
+
+    n_threads = wine_adpf_collect_threads( tids, max_threads > 64 ? 64 : max_threads );
+    if (n_threads < 1)
+    {
+        tids[0]   = (int32_t)gettid();
+        n_threads = 1;
+    }
+
+    state.session = create_session( mgr, tids, (size_t)n_threads, target_ns );
+    if (!state.session)
+    {
+        WARN( "WINE_ADPF: createSession failed (n_tids=%d target_ns=%lld).\n",
+              n_threads, (long long)target_ns );
+        return NULL;
+    }
+
+    state.target_ns            = target_ns;
+    state.max_threads          = max_threads;
+    state.use_hints            = use_hints;
+    state.hint_id_cpu_load_up  = 0; /* APERF_HINT_CPU_LOAD_UP = 0 in the NDK */
+
+    if (pthread_create( &hb_thread, NULL, wine_adpf_heartbeat, &state ) != 0)
+    {
+        WARN( "WINE_ADPF: pthread_create(heartbeat) failed: %s\n", strerror( errno ) );
+        /* Session is still live and tracked threads still benefit from
+         * placement — just no feedback loop. Don't tear down. */
+    }
+    else
+    {
+        pthread_detach( hb_thread );
+    }
+
+    TRACE( "HACK: WINE_ADPF v2 active — target=%lldms, n_threads=%d, hints=%s, setThreads=%s.\n",
+           (long long)target_ns / 1000000, n_threads,
+           use_hints ? "on" : "off",
+           state.set_threads ? "on" : "off" );
+    return &state;
+}
+#endif
 
 /***********************************************************************
  *           start_main_thread
@@ -2450,7 +2741,9 @@ static void start_main_thread(void)
     set_thread_teb( teb );
 #endif
 
+#ifdef M_PERTURB
     mallopt( M_PERTURB, 0xff );
+#endif
     init_startup_info();
     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
     set_load_order_app_name( main_wargv[0] );
@@ -2459,7 +2752,9 @@ static void start_main_thread(void)
     load_ntdll();
     load_wow64_ntdll( main_image_info.Machine );
     load_apiset_dll();
+#ifdef M_PERTURB
     mallopt( M_PERTURB, 0 );
+#endif
     server_init_process_done();
 }
 

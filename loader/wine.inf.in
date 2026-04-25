@@ -55,6 +55,7 @@ RegisterDlls=RegisterDllsSection
 WineFakeDlls=FakeDlls
 UpdateInis=SystemIni
 CopyFiles=ColorFiles,EtcFiles,InfFiles,NlsFiles,SortFiles,WinmdFiles
+DelReg=WinebthCleanup
 AddReg=\
     Classes,\
     ContentIndex,\
@@ -1279,11 +1280,23 @@ services,"@%11%\ws2_32.dll,-4"
 [InfFiles]
 input.inf,"@%12%\hidclass.sys,-1"
 mouhid.inf,"@%12%\mouhid.sys,-1"
-winebth.inf,"@%12%\winebth.sys,-1"
+; winebth.inf disabled for WinNative: Android has no BlueZ/dbus and the root PnP
+; node registration triggers err:ntoskrnl:ZwLoadDriver c00000e5 on every boot.
+; winebth.inf,"@%12%\winebth.sys,-1"
 winebus.inf,"@%12%\winebus.sys,-1"
 winehid.inf,"@%12%\winehid.sys,-1"
 wineusb.inf,"@%12%\wineusb.sys,-1"
 winexinput.inf,"@%12%\winexinput.sys,-1"
+
+; WinNative/Winlator cleanup — strip any winebth registrations inherited from
+; an older prefixPack or prior Wine release. Android has no BlueZ/dbus so the
+; driver cannot initialize; Enum\Root\WINE\WINEBTH present → PnP triggers
+; ZwLoadDriver → c00000e5 every boot. DelReg runs on every wine.inf apply.
+[WinebthCleanup]
+HKLM,"System\CurrentControlSet\Services\winebth"
+HKLM,"System\ControlSet001\Services\winebth"
+HKLM,"System\CurrentControlSet\Enum\Root\WINE\WINEBTH"
+HKLM,"System\ControlSet001\Enum\Root\WINE\WINEBTH"
 
 [NlsFiles]
 c_037.nls

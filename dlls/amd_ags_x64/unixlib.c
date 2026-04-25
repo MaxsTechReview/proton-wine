@@ -30,11 +30,11 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-
+#ifndef __ANDROID__
 #include <xf86drm.h>
 #include <amdgpu_drm.h>
 #include <amdgpu.h>
-
+#endif
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
 #include "windef.h"
@@ -45,6 +45,8 @@
 #include "unixlib.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(amd_ags);
+
+#ifndef __ANDROID__
 
 #define MAX_DEVICE_COUNT 64
 
@@ -281,3 +283,6 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     init,
     get_device_info,
 };
+#else
+const unixlib_entry_t __wine_unix_call_funcs[] = {};
+#endif

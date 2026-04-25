@@ -35,6 +35,7 @@
 #include "thread.h"
 #include "request.h"
 #include "security.h"
+#include "esync.h"
 
 static const WCHAR semaphore_name[] = {'S','e','m','a','p','h','o','r','e'};
 
@@ -55,11 +56,14 @@ struct semaphore_sync
     struct object       obj;                /* object header */
     unsigned int        count;              /* current count */
     unsigned int        max;                /* maximum possible count */
+    int                 esync_fd;           /* WinNative: eventfd for ESYNC clients */
 };
 
 static void semaphore_sync_dump( struct object *obj, int verbose );
 static int semaphore_sync_signaled( struct object *obj, struct wait_queue_entry *entry );
 static void semaphore_sync_satisfied( struct object *obj, struct wait_queue_entry *entry );
+static void semaphore_sync_destroy( struct object *obj );
+static int semaphore_sync_get_esync_fd( struct object *obj, enum esync_type *type );
 
 static const struct object_ops semaphore_sync_ops =
 {
@@ -83,8 +87,25 @@ static const struct object_ops semaphore_sync_ops =
     no_open_file,                  /* open_file */
     no_kernel_obj_list,            /* get_kernel_obj_list */
     no_close_handle,               /* close_handle */
-    no_destroy                     /* destroy */
+    semaphore_sync_destroy,        /* destroy */
+    semaphore_sync_get_esync_fd,   /* get_esync_fd */
 };
+
+static int semaphore_sync_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct semaphore_sync *sem = (struct semaphore_sync *)obj;
+    assert( obj->ops == &semaphore_sync_ops );
+    if (type) *type = ESYNC_SEMAPHORE;
+    return sem->esync_fd;
+}
+
+static void semaphore_sync_destroy( struct object *obj )
+{
+    struct semaphore_sync *sem = (struct semaphore_sync *)obj;
+    assert( obj->ops == &semaphore_sync_ops );
+    if (do_esync() && sem->esync_fd != -1)
+        close( sem->esync_fd );
+}
 
 static int release_semaphore( struct semaphore_sync *sem, unsigned int count,
                               unsigned int *prev )
@@ -104,6 +125,14 @@ static int release_semaphore( struct semaphore_sync *sem, unsigned int count,
     {
         sem->count = count;
         wake_up( &sem->obj, count );
+    }
+    /* WinNative: notify ESYNC clients by writing `count` to the eventfd so
+     * up to `count` waiters unblock. Without this, ESync clients blocked in
+     * WaitForSingleObject on a semaphore never wake. */
+    if (do_esync() && sem->esync_fd != -1)
+    {
+        unsigned int i;
+        for (i = 0; i < count; i++) esync_wake_fd( sem->esync_fd );
     }
     return 1;
 }
@@ -128,6 +157,10 @@ static void semaphore_sync_satisfied( struct object *obj, struct wait_queue_entr
     assert( obj->ops == &semaphore_sync_ops );
     assert( sem->count );
     sem->count--;
+    /* WinNative: clear one eventfd count when a waiter is satisfied, so the
+     * kernel eventfd value stays in sync with semaphore count. */
+    if (do_esync() && sem->esync_fd != -1 && !sem->count)
+        esync_clear( sem->esync_fd );
 }
 
 static struct object *create_semaphore_sync( unsigned int initial, unsigned int max )
@@ -139,6 +172,13 @@ static struct object *create_semaphore_sync( unsigned int initial, unsigned int 
     if (!(sem = alloc_object( &semaphore_sync_ops ))) return NULL;
     sem->count = initial;
     sem->max   = max;
+    sem->esync_fd = -1;
+
+    /* WinNative: initialize eventfd with current count so ESYNC clients see
+     * the semaphore as signaled when count > 0. */
+    if (do_esync())
+        sem->esync_fd = esync_create_fd( initial, 0 );
+
     return &sem->obj;
 }
 
@@ -152,6 +192,7 @@ static void semaphore_dump( struct object *obj, int verbose );
 static struct object *semaphore_get_sync( struct object *obj );
 static int semaphore_signal( struct object *obj, unsigned int access, int signal );
 static void semaphore_destroy( struct object *obj );
+static int semaphore_get_esync_fd( struct object *obj, enum esync_type *type );
 
 static const struct object_ops semaphore_ops =
 {
@@ -176,7 +217,17 @@ static const struct object_ops semaphore_ops =
     no_kernel_obj_list,            /* get_kernel_obj_list */
     no_close_handle,               /* close_handle */
     semaphore_destroy,             /* destroy */
+    semaphore_get_esync_fd,        /* get_esync_fd */
 };
+
+static int semaphore_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct semaphore *sem = (struct semaphore *)obj;
+    if (sem->sync && sem->sync->ops == &semaphore_sync_ops)
+        return semaphore_sync_get_esync_fd( sem->sync, type );
+    if (type) *type = ESYNC_SEMAPHORE;
+    return -1;
+}
 
 static struct semaphore *create_semaphore( struct object *root, const struct unicode_str *name,
                                            unsigned int attr, unsigned int initial, unsigned int max,

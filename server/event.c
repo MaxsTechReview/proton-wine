@@ -35,6 +35,7 @@
 #include "thread.h"
 #include "request.h"
 #include "security.h"
+#include "esync.h"
 
 static const WCHAR event_name[] = {'E','v','e','n','t'};
 
@@ -55,12 +56,15 @@ struct event_sync
     struct object  obj;             /* object header */
     unsigned int   manual : 1;      /* is it a manual reset event? */
     unsigned int   signaled : 1;    /* event has been signaled */
+    int            esync_fd;        /* WinNative: eventfd for ESync waiters */
 };
 
 static void event_sync_dump( struct object *obj, int verbose );
 static int event_sync_signaled( struct object *obj, struct wait_queue_entry *entry );
 static void event_sync_satisfied( struct object *obj, struct wait_queue_entry *entry );
 static int event_sync_signal( struct object *obj, unsigned int access, int signal );
+static int event_sync_get_esync_fd( struct object *obj, enum esync_type *type );
+static void event_sync_destroy( struct object *obj );
 
 static const struct object_ops event_sync_ops =
 {
@@ -84,7 +88,8 @@ static const struct object_ops event_sync_ops =
     no_open_file,              /* open_file */
     no_kernel_obj_list,        /* get_kernel_obj_list */
     no_close_handle,           /* close_handle */
-    no_destroy                 /* destroy */
+    event_sync_destroy,        /* destroy */
+    event_sync_get_esync_fd,   /* get_esync_fd */
 };
 
 static struct object *create_event_sync( int manual, int signaled )
@@ -96,6 +101,10 @@ static struct object *create_event_sync( int manual, int signaled )
     if (!(event = alloc_object( &event_sync_ops ))) return NULL;
     event->manual   = manual;
     event->signaled = signaled;
+    event->esync_fd = -1;
+
+    if (do_esync())
+        event->esync_fd = esync_create_fd( signaled, 0 );
 
     return &event->obj;
 }
@@ -107,8 +116,43 @@ struct event_sync *create_server_internal_sync( int manual, int signaled )
     if (!(event = alloc_object( &event_sync_ops ))) return NULL;
     event->manual   = manual;
     event->signaled = signaled;
+    event->esync_fd = -1;
+
+    if (do_esync())
+        event->esync_fd = esync_create_fd( signaled, 0 );
 
     return event;
+}
+
+static int event_sync_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct event_sync *event = (struct event_sync *)obj;
+    *type = event->manual ? ESYNC_MANUAL_SERVER : ESYNC_AUTO_SERVER;
+    return event->esync_fd;
+}
+
+/* WinNative: helper for ALL wrapper objects (thread, process, queue,
+ * completion, console, device_manager, timer, fd) whose get_esync_fd
+ * callbacks previously returned their own wrapper->esync_fd that was never
+ * signaled. Wine 11 routes signaling through wrapper->sync (an event_sync),
+ * which now carries its own esync_fd. Wrappers should redirect clients to
+ * sync->esync_fd so client/server agree on the same kernel eventfd. */
+int sync_get_esync_fd( struct object *sync, enum esync_type *type )
+{
+    if (sync && sync->ops == &event_sync_ops)
+    {
+        struct event_sync *es = (struct event_sync *)sync;
+        if (type) *type = es->manual ? ESYNC_MANUAL_SERVER : ESYNC_AUTO_SERVER;
+        return es->esync_fd;
+    }
+    return -1;
+}
+
+static void event_sync_destroy( struct object *obj )
+{
+    struct event_sync *event = (struct event_sync *)obj;
+    if (do_esync() && event->esync_fd != -1)
+        close( event->esync_fd );
 }
 
 struct object *create_internal_sync( int manual, int signaled )
@@ -137,16 +181,53 @@ static void event_sync_satisfied( struct object *obj, struct wait_queue_entry *e
     struct event_sync *event = (struct event_sync *)obj;
     assert( obj->ops == &event_sync_ops );
     /* Reset if it's an auto-reset event */
-    if (!event->manual) event->signaled = 0;
+    if (!event->manual)
+    {
+        event->signaled = 0;
+        /* WinNative: clear the eventfd too so subsequent esync waits block. */
+        if (do_esync() && event->esync_fd != -1)
+            esync_clear( event->esync_fd );
+    }
+}
+
+static int wn_sync_trace_enabled(void)
+{
+    static int cached = -1;
+    if (cached == -1)
+    {
+        const char *e = getenv( "WN_SYNC_TRACE" );
+        cached = e && atoi( e ) > 0;
+    }
+    return cached;
 }
 
 static int event_sync_signal( struct object *obj, unsigned int access, int signal )
 {
     struct event_sync *event = (struct event_sync *)obj;
+    int prev;
     assert( obj->ops == &event_sync_ops );
 
-    /* wake up all waiters if manual reset, a single one otherwise */
-    if ((event->signaled = !!signal)) wake_up( &event->obj, !event->manual );
+    prev = event->signaled;
+    if ((event->signaled = !!signal))
+    {
+        /* wake up all waiters if manual reset, a single one otherwise */
+        wake_up( &event->obj, !event->manual );
+        /* WinNative: also signal the eventfd so ESync waiters polling on it
+         * wake up. Without this, any WaitForSingleObject that went through
+         * the ESync client path (do_esync()=1) never sees the server-side
+         * signal_sync() completion → boot_event timeout, RpcSs timeout,
+         * nodrv_CreateWindow, etc. fd guard in esync_wake_fd handles -1. */
+        if (do_esync() && event->esync_fd != -1)
+            esync_wake_fd( event->esync_fd );
+    }
+    else if (do_esync() && event->esync_fd != -1)
+    {
+        /* reset path — clear the eventfd */
+        esync_clear( event->esync_fd );
+    }
+    if (wn_sync_trace_enabled())
+        fprintf( stderr, "WN_SYNC_TRACE: event_sync_signal obj=%p fd=%d manual=%d prev=%d signal=%d\n",
+                 event, event->esync_fd, event->manual, prev, signal );
     return 1;
 }
 
@@ -155,10 +236,13 @@ struct event
     struct object      obj;             /* object header */
     struct object     *sync;            /* event sync object */
     struct list        kernel_object;   /* list of kernel object pointers */
+    int                manual_reset;    /* is it a manual reset event? */
+    int                esync_fd;        /* esync file descriptor */
 };
 
 static void event_dump( struct object *obj, int verbose );
 static struct object *event_get_sync( struct object *obj );
+static int event_get_esync_fd( struct object *obj, enum esync_type *type );
 static int event_signal( struct object *obj, unsigned int access, int signal );
 static struct list *event_get_kernel_obj_list( struct object *obj );
 static void event_destroy( struct object *obj );
@@ -186,6 +270,13 @@ static const struct object_ops event_ops =
     event_get_kernel_obj_list, /* get_kernel_obj_list */
     no_close_handle,           /* close_handle */
     event_destroy,             /* destroy */
+    /* Reverted back to event_get_esync_fd — leaving this NULL caused
+     * __esync_wait_objects mixed-wait fixmes (events got STATUS_NOT_IMPLEMENTED
+     * from server's get_esync_fd handler, other object types returned esync
+     * fds, client hit the "can't wait on esync and server at the same time"
+     * degraded path). All object types must expose an eventfd for the wake_up
+     * bridge + fd guards to handle everything uniformly. */
+    event_get_esync_fd,        /* get_esync_fd */
 };
 
 
@@ -233,7 +324,8 @@ static const struct object_ops keyed_event_ops =
     no_open_file,                /* open_file */
     no_kernel_obj_list,          /* get_kernel_obj_list */
     no_close_handle,             /* close_handle */
-    no_destroy                   /* destroy */
+    no_destroy,                  /* destroy */
+    NULL,                        /* get_esync_fd */
 };
 
 
@@ -249,6 +341,8 @@ struct event *create_event( struct object *root, const struct unicode_str *name,
         {
             /* initialize it if it didn't already exist */
             event->sync = NULL;
+            event->manual_reset = manual_reset;
+            event->esync_fd = -1;
             list_init( &event->kernel_object );
 
             if (!(event->sync = create_event_sync( manual_reset, initial_state )))
@@ -256,6 +350,9 @@ struct event *create_event( struct object *root, const struct unicode_str *name,
                 release_object( event );
                 return NULL;
             }
+
+            if (do_esync())
+                event->esync_fd = esync_create_fd( initial_state, 0 );
         }
     }
     return event;
@@ -263,17 +360,44 @@ struct event *create_event( struct object *root, const struct unicode_str *name,
 
 struct event *get_event_obj( struct process *process, obj_handle_t handle, unsigned int access )
 {
+    struct object *obj;
+
+    if (do_esync() && (obj = get_handle_obj( process, handle, access, &esync_ops )))
+        return (struct event *)obj; /* even though it's not an event */
+
     return (struct event *)get_handle_obj( process, handle, access, &event_ops );
 }
 
 void set_event( struct event *event )
 {
+    if (do_esync() && event->obj.ops == &esync_ops)
+    {
+        esync_set_event( (struct esync *)event );
+        return;
+    }
+
     signal_sync( event->sync );
+    /* WinNative: bridge for ESync waiters. Wine 11's signal_sync only wakes
+     * event_sync/inproc_sync waiters; ESync waiters are polling on
+     * event->esync_fd and need an explicit eventfd write. Without this, any
+     * client doing WaitForSingleObject(boot_event) via esync_wait_objects
+     * never wakes when wineboot signals "I'm done" — the boot_event wait
+     * timeout bug. */
+    if (do_esync()) esync_wake_up( &event->obj );
 }
 
 void reset_event( struct event *event )
 {
+    if (do_esync() && event->obj.ops == &esync_ops)
+    {
+        esync_reset_event( (struct esync *)event );
+        return;
+    }
+
     reset_sync( event->sync );
+
+    if (do_esync())
+        esync_clear( event->esync_fd );
 }
 
 static void event_dump( struct object *obj, int verbose )
@@ -288,6 +412,25 @@ static struct object *event_get_sync( struct object *obj )
     struct event *event = (struct event *)obj;
     assert( obj->ops == &event_ops );
     return grab_object( event->sync );
+}
+
+static int event_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct event *event = (struct event *)obj;
+    *type = event->manual_reset ? ESYNC_MANUAL_SERVER : ESYNC_AUTO_SERVER;
+    /* WinNative: Wine 11 routes all signaling through event->sync (event_sync
+     * or inproc_sync). We return THAT object's esync_fd so the client polls
+     * the same kernel eventfd that the server writes to via signal_sync →
+     * event_sync_signal → esync_wake_fd. Fall back to event's own esync_fd
+     * if sync isn't an event_sync_ops (e.g. inproc_sync on NTSync systems,
+     * which shouldn't happen when WINEESYNC=1 and WINENTSYNC=0 but guard
+     * anyway). */
+    if (event->sync && event->sync->ops == &event_sync_ops)
+    {
+        struct event_sync *sync = (struct event_sync *)event->sync;
+        if (sync->esync_fd != -1) return sync->esync_fd;
+    }
+    return event->esync_fd;
 }
 
 static int event_signal( struct object *obj, unsigned int access, int signal )
@@ -319,6 +462,8 @@ static void event_destroy( struct object *obj )
     assert( obj->ops == &event_ops );
 
     if (event->sync) release_object( event->sync );
+    if (do_esync())
+        close( event->esync_fd );
 }
 
 struct keyed_event *create_keyed_event( struct object *root, const struct unicode_str *name,

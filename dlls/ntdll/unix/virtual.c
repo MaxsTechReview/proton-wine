@@ -314,9 +314,15 @@ static void *address_space_start = (void *)0x110000; /* keep DOS area clear */
 static void *address_space_start = (void *)0x10000;
 #endif
 #ifdef _WIN64
+#ifdef __ANDROID__
+static void *address_space_limit = (void *)0x7fffff0000;  /* top of the total available address space */
+static void *user_space_limit    = (void *)0x7fffff0000;  /* top of the user address space */
+static void *working_set_limit   = (void *)0x7fffff0000;  /* top of the current working set */
+#else
 static void *address_space_limit = (void *)0x7fffffff0000;  /* top of the total available address space */
 static void *user_space_limit    = (void *)0x7fffffff0000;  /* top of the user address space */
 static void *working_set_limit   = (void *)0x7fffffff0000;  /* top of the current working set */
+#endif
 #else
 static void *address_space_limit = (void *)0xc0000000;
 static void *user_space_limit    = (void *)0x7fff0000;
@@ -373,7 +379,7 @@ static void *preload_reserve_end;
 static BOOL force_exec_prot;  /* whether to force PROT_EXEC on all PROT_READ mmaps */
 static BOOL enable_write_exceptions;  /* raise exception on writes to executable memory */
 
-#if defined(linux) && defined(__aarch64__)
+#if defined(linux) && defined(__aarch64__) && !defined(__ANDROID__)
 #define FEX_STATS_SHM_MAX_SIZE 0x400000
 static void *fex_stats_shm;
 #endif
@@ -418,6 +424,7 @@ void *anon_mmap_alloc( size_t size, int prot )
 #ifdef USE_UFFD_WRITEWATCH
 static void kernel_writewatch_init(void)
 {
+#ifndef __ANDROID__
     struct uffdio_api uffdio_api;
 
     uffd_fd = syscall( __NR_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY );
@@ -439,6 +446,10 @@ static void kernel_writewatch_init(void)
     }
     use_kernel_writewatch = 1;
     TRACE( "Using kernel write watches.\n" );
+#else
+    TRACE( "Kernel writewatches are not supported on Android\n" );
+    use_kernel_writewatch = 0;
+#endif
 }
 
 static void kernel_writewatch_reset( void *start, SIZE_T len )
@@ -2937,7 +2948,11 @@ static NTSTATUS allocate_dos_memory( struct file_view **view, unsigned int vprot
         addr = anon_mmap_tryfixed( (void *)host_page_size, 0x10000 - host_page_size, unix_prot, 0 );
         if (addr != MAP_FAILED)
         {
-            if (!anon_mmap_fixed( NULL, host_page_size, unix_prot, 0 ))
+            /* MAP_FIXED_NOREPLACE here: refuse to silently overwrite a
+             * surprise mapping at page zero. The reserved-area check above
+             * is advisory; this turns "I'd been hand-fed a stray mapping
+             * at 0" into a clean failure instead of memory corruption. */
+            if (anon_mmap_tryfixed( NULL, host_page_size, unix_prot, 0 ) == NULL)
             {
                 addr = NULL;
                 TRACE( "successfully mapped low 64K range\n" );
@@ -3490,8 +3505,55 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
         if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) vprot |= VPROT_EXEC;
 
         if (!set_vprot( view, ptr + sec[i].VirtualAddress, size, vprot ) && (vprot & VPROT_EXEC))
+        {
+            int saved_errno = errno;
             ERR( "failed to set %08x protection on %s section %.8s, noexec filesystem?\n",
                  sec[i].Characteristics, debugstr_us(nt_name), sec[i].Name );
+#ifdef __ANDROID__
+            /* Android: external storage mounts (/storage/emulated/...) are
+             * noexec, so mprotect(PROT_EXEC) on a file-backed mapping returns
+             * EACCES. Replace the section's file-backed pages with an anon
+             * RWX mapping seeded from the already-mapped bytes, then apply
+             * the final protections. Skip shared+writable sections — those
+             * are intentionally backed by shared_fd and must stay shared. */
+            if (saved_errno == EACCES &&
+                !((sec[i].Characteristics & IMAGE_SCN_MEM_SHARED) &&
+                  (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)))
+            {
+                char *sec_addr = ptr + sec[i].VirtualAddress;
+                void *snapshot = malloc( size );
+
+                if (snapshot)
+                {
+                    memcpy( snapshot, sec_addr, size );
+                    if (anon_mmap_fixed( sec_addr, size,
+                                         PROT_READ | PROT_WRITE | PROT_EXEC, 0 ) != MAP_FAILED)
+                    {
+                        memcpy( sec_addr, snapshot, size );
+                        if (set_vprot( view, sec_addr, size, vprot ))
+                            ERR( "WINNATIVE_VPROT_FALLBACK: replaced %s section %.8s "
+                                 "with anon RWX at %p (size %lx)\n",
+                                 debugstr_us(nt_name), sec[i].Name, sec_addr, (unsigned long)size );
+                        else
+                            ERR( "WINNATIVE_VPROT_FALLBACK: anon-RWX set_vprot still failed "
+                                 "for %s section %.8s\n", debugstr_us(nt_name), sec[i].Name );
+                    }
+                    else
+                    {
+                        ERR( "WINNATIVE_VPROT_FALLBACK: anon_mmap_fixed failed for %s section %.8s: %s\n",
+                             debugstr_us(nt_name), sec[i].Name, strerror( errno ) );
+                    }
+                    free( snapshot );
+                }
+                else
+                {
+                    ERR( "WINNATIVE_VPROT_FALLBACK: out of memory snapshotting %s section %.8s\n",
+                         debugstr_us(nt_name), sec[i].Name );
+                }
+            }
+#endif
+            (void)saved_errno;
+        }
     }
 
 #ifdef VALGRIND_LOAD_PDB_DEBUGINFO
@@ -4280,6 +4342,11 @@ static TEB *init_teb( void *ptr, BOOL is_wow )
     thread_data->alert_fd   = -1;
     list_add_head( &teb_list, &thread_data->entry );
     thread_data->fsync_apc_futex = NULL;
+    /* WinNative: esync_apc_fd must start at -1 so the first alertable wait
+     * triggers the get_esync_apc_fd RPC. Without this, the zero-initialized
+     * TEB leaves the field at 0 (= stdin), and every alertable poll spurious-
+     * wakes on stdin's EOF POLLIN, driving the process into a busy-loop. */
+    thread_data->esync_apc_fd = -1;
     return teb;
 }
 
@@ -6563,7 +6630,7 @@ static unsigned int get_memory_image_info( HANDLE process, LPCVOID addr, MEMORY_
     return status;
 }
 
-#if defined(linux) && defined(__aarch64__)
+#if defined(linux) && defined(__aarch64__) && !defined(__ANDROID__)
 NTSTATUS get_memory_fex_stats_shm( HANDLE process, LPCVOID addr, MEMORY_FEX_STATS_SHM_INFORMATION *info,
                                    SIZE_T len, SIZE_T *res_len)
 {
@@ -6652,7 +6719,7 @@ NTSTATUS WINAPI NtQueryVirtualMemory( HANDLE process, LPCVOID addr,
             return STATUS_INVALID_HANDLE;
 
         case MemoryFexStatsShm:
-#if defined(linux) && defined(__aarch64__)
+#if defined(linux) && defined(__aarch64__) && !defined(__ANDROID__)
             return get_memory_fex_stats_shm( process, addr, buffer, len, res_len );
 #else
             return STATUS_INVALID_INFO_CLASS;

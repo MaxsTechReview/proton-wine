@@ -127,6 +127,9 @@ static const UINT button_up_data[NB_BUTTONS] =
 XContext cursor_context = 0;
 
 static RECT clip_rect;
+static POINT clip_center;  /* center of clipping rect for relative motion synthesis */
+static POINT clip_center_root;  /* same point in X root coordinates for warping / deltas */
+static BOOL needs_relative_motion;  /* TRUE when game wants clipping but xinput2 unavailable */
 static Cursor create_cursor( HANDLE handle );
 
 #ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
@@ -139,6 +142,20 @@ MAKE_FUNCPTR(XIQueryDevice);
 MAKE_FUNCPTR(XIQueryVersion);
 MAKE_FUNCPTR(XISelectEvents);
 #undef MAKE_FUNCPTR
+#endif
+
+/* When XInput2 is available, explorer.exe centralises WM_INPUT generation via
+ * SEND_HWMSG_NO_MSG raw events, so game processes must suppress their own raw
+ * input dispatch to avoid duplicates (SEND_HWMSG_NO_RAW = legacy only).
+ * When XInput2 is absent there is no explorer.exe raw input pipeline, so each
+ * process must generate WM_INPUT itself alongside the legacy message. */
+#if defined(HAVE_X11_EXTENSIONS_XINPUT2_H) && !defined(__ANDROID__)
+static inline UINT get_send_mouse_flags(void)
+{
+    return xinput2_available ? SEND_HWMSG_NO_RAW : 0;
+}
+#else
+static inline UINT get_send_mouse_flags(void) { return 0; }
 #endif
 
 #ifdef HAVE_X11_EXTENSIONS_XINPUT_H
@@ -436,7 +453,7 @@ void x11drv_xinput2_init( struct x11drv_thread_data *data )
     TRACE( "XInput2 %d.%d available\n", major, minor );
 }
 
-#else /* HAVE_X11_EXTENSIONS_XINPUT2_H */
+#else /* defined(HAVE_X11_EXTENSIONS_XINPUT2_H) && !defined(__ANDROID__) */
 
 void x11drv_xinput2_enable( Display *display, Window window )
 {
@@ -450,7 +467,7 @@ void x11drv_xinput2_init( struct x11drv_thread_data *data )
 {
 }
 
-#endif /* HAVE_X11_EXTENSIONS_XINPUT2_H */
+#endif /* defined(HAVE_X11_EXTENSIONS_XINPUT2_H) && !defined(__ANDROID__) */
 
 /***********************************************************************
  *		grab_clipping_window
@@ -459,7 +476,6 @@ void x11drv_xinput2_init( struct x11drv_thread_data *data )
  */
 static BOOL grab_clipping_window( const RECT *clip )
 {
-#ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
     struct x11drv_thread_data *data = x11drv_thread_data();
     Window clip_window;
     HCURSOR cursor;
@@ -478,10 +494,19 @@ static BOOL grab_clipping_window( const RECT *clip )
         WARN( "refusing to clip to %s\n", wine_dbgstr_rect(clip) );
         return FALSE;
     }
+#if defined(HAVE_X11_EXTENSIONS_XINPUT2_H) && !defined(__ANDROID__)
     if (!xinput2_available)
+#endif
     {
-        WARN( "XInput2 not supported, refusing to clip to %s\n", wine_dbgstr_rect(clip) );
-        NtUserClipCursor( NULL );
+        WARN( "XInput2 not available, enabling relative motion for %s\n", wine_dbgstr_rect(clip) );
+        clip_rect = *clip;
+        clip_center.x = (clip->left + clip->right) / 2;
+        clip_center.y = (clip->top + clip->bottom) / 2;
+        clip_center_root = virtual_screen_to_root( clip_center.x, clip_center.y );
+        needs_relative_motion = TRUE;
+        XWarpPointer( data->display, None, root_window, 0, 0, 0, 0, clip_center_root.x, clip_center_root.y );
+        data->warp_serial = NextRequest( data->display );
+        XFlush( data->display );
         return TRUE;
     }
 
@@ -525,10 +550,6 @@ static BOOL grab_clipping_window( const RECT *clip )
     clip_rect = *clip;
     data->clipping_cursor = TRUE;
     return TRUE;
-#else
-    WARN( "XInput2 was not available at compile time\n" );
-    return FALSE;
-#endif
 }
 
 /***********************************************************************
@@ -548,6 +569,8 @@ void ungrab_clipping_window(void)
     if (clipping_cursor) XUngrabPointer( data->display, CurrentTime );
     clipping_cursor = FALSE;
     data->clipping_cursor = FALSE;
+    needs_relative_motion = FALSE;
+    clip_center_root.x = clip_center_root.y = 0;
     x11drv_xinput2_disable( data->display, DefaultRootWindow( data->display ) );
 }
 
@@ -636,7 +659,7 @@ static void send_mouse_input( HWND hwnd, Window window, unsigned int state, INPU
     {
         struct x11drv_thread_data *thread_data = x11drv_thread_data();
         if (!thread_data->clipping_cursor || thread_data->clip_window != window) return;
-        NtUserSendHardwareInput( hwnd, SEND_HWMSG_NO_RAW, input, 0 );
+        NtUserSendHardwareInput( hwnd, get_send_mouse_flags(), input, 0 );
         return;
     }
 
@@ -1484,10 +1507,14 @@ BOOL X11DRV_SetCursorPos( INT x, INT y )
         return FALSE;
     }
 
+#ifndef __ANDROID__
     pXFixesHideCursor( data->display, root_window );
+#endif
     XWarpPointer( data->display, root_window, root_window, 0, 0, 0, 0, pos.x, pos.y );
     data->warp_serial = NextRequest( data->display );
+#ifndef __ANDROID__
     pXFixesShowCursor( data->display, root_window );
+#endif
     XFlush( data->display ); /* avoids bad mouse lag in games that do their own mouse warping */
     TRACE( "warped to %d,%d serial %lu\n", x, y, data->warp_serial );
     return TRUE;
@@ -1657,18 +1684,43 @@ BOOL X11DRV_MotionNotify( HWND hwnd, XEvent *xev )
     TRACE( "hwnd %p/%lx pos %d,%d is_hint %d serial %lu\n",
            hwnd, event->window, event->x, event->y, event->is_hint, event->serial );
 
-    input.mi.dx          = event->x;
-    input.mi.dy          = event->y;
-    input.mi.mouseData   = 0;
-    input.mi.dwFlags     = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-    input.mi.time        = EVENT_x11_time_to_win32_time( event->time );
-    input.mi.dwExtraInfo = 0;
-
     if (is_old_motion_event( event->serial ))
     {
         TRACE( "pos %d,%d old serial %lu, ignoring\n", event->x, event->y, event->serial );
         return FALSE;
     }
+
+    input.mi.mouseData   = 0;
+    input.mi.time        = EVENT_x11_time_to_win32_time( event->time );
+    input.mi.dwExtraInfo = 0;
+
+    /* Synthesize relative motion when game wants clipping but xinput2 unavailable */
+    if (needs_relative_motion && hwnd)
+    {
+        struct x11drv_thread_data *thread_data = x11drv_thread_data();
+        int dx = event->x_root - clip_center_root.x;
+        int dy = event->y_root - clip_center_root.y;
+
+        if (dx == 0 && dy == 0)
+            return FALSE;
+
+        input.mi.dx      = dx;
+        input.mi.dy      = dy;
+        input.mi.dwFlags = MOUSEEVENTF_MOVE;
+
+        /* Warp cursor back to center and ignore the synthetic recenter event. */
+        XWarpPointer( event->display, None, root_window, 0, 0, 0, 0, clip_center_root.x, clip_center_root.y );
+        thread_data->warp_serial = NextRequest( event->display );
+        XFlush( event->display );
+
+        send_mouse_input( hwnd, event->window, event->state, &input );
+        return TRUE;
+    }
+
+    input.mi.dx          = event->x;
+    input.mi.dy          = event->y;
+    input.mi.dwFlags     = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+
     map_event_coords( hwnd, event->window, event->root, event->x_root, event->y_root, &input );
     send_mouse_input( hwnd, event->window, event->state, &input );
     return TRUE;

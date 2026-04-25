@@ -42,6 +42,7 @@
 #include "unicode.h"
 #include "security.h"
 
+#include "esync.h"
 #include "fsync.h"
 
 /* command-line options */
@@ -264,6 +265,18 @@ int main( int argc, char *argv[] )
 
     if (do_fsync())
         fsync_init();
+
+    if (do_esync())
+        esync_init();
+
+    /* WinNative: only one primitive is ever active per wineserver process.
+     * get_inproc_device_fd() eagerly probes /dev/ntsync (if WINENTSYNC=1) and
+     * caches the result. If it returns >= 0, NTSync is live and has already
+     * printed "ntsync: up and running.". We must NOT also print the
+     * server-sync banner — that would falsely imply two sync modes at once.
+     * Likewise suppress the banner if FSync or ESync came up. */
+    if (!do_fsync() && !do_esync() && get_inproc_device_fd() < 0)
+        fprintf( stderr, "wineserver: using server-side synchronization.\n" );
 
     if (debug_level) fprintf( stderr, "wineserver: starting (pid=%ld)\n", (long) getpid() );
     set_current_time();

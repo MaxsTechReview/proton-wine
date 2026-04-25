@@ -949,6 +949,9 @@ static void file_entry_init(FILE_ENTRY *file_entry,
     size_t file_name_len = wcslen(file_name) + 1;
     const WCHAR *ptr;
 
+    file_entry->szDirectory = NULL;
+    file_entry->szFilename = NULL;
+
     file_entry->szFullPath = malloc(file_name_len * sizeof(WCHAR));
     wcscpy(file_entry->szFullPath, file_name);
 
@@ -962,6 +965,15 @@ static void file_entry_init(FILE_ENTRY *file_entry,
         file_name_len = wcslen(file_entry->szFullPath) - file_name_len + 1;
         file_entry->szFilename = malloc(file_name_len * sizeof(WCHAR));
         lstrcpyW(file_entry->szFilename, ptr + 1); /* Skip over backslash. */
+    }
+    else
+    {
+        file_entry->szDirectory = malloc(sizeof(WCHAR));
+        file_entry->szDirectory[0] = 0;
+
+        file_name_len = wcslen(file_entry->szFullPath) + 1;
+        file_entry->szFilename = malloc(file_name_len * sizeof(WCHAR));
+        lstrcpyW(file_entry->szFilename, file_entry->szFullPath);
     }
 
     file_entry->attributes = attributes;
@@ -1173,11 +1185,16 @@ static DWORD do_copy_move(FILE_OPERATION *op, const FILE_ENTRY *from, const FILE
             debugstr_w(from->szFullPath), debugstr_w(to->szFullPath), op->req->fFlags, append_file_name);
 
     /* Determine target path. */
-    wcscpy(target_dir, to->szDirectory);
+    if (to->szDirectory)
+        wcscpy(target_dir, to->szDirectory);
+    else
+        target_dir[0] = 0;
+
     wcscpy(target, to->szFullPath);
     if (append_file_name)
     {
-        PathAppendW(target_dir, to->szFilename);
+        if (to->szFilename)
+            PathAppendW(target_dir, to->szFilename);
         PathAppendW(target, from->szFilename);
     }
 
@@ -1198,7 +1215,7 @@ static DWORD do_copy_move(FILE_OPERATION *op, const FILE_ENTRY *from, const FILE
         return DE_DESTSUBTREE;
 
     /* Create target dir. */
-    if (!PathFileExistsW(target_dir))
+    if (target_dir[0] && !PathFileExistsW(target_dir))
         SHCreateDirectoryExW(NULL, target_dir, NULL);
 
     /* Source contains wildcard. */
@@ -2346,3 +2363,4 @@ HRESULT WINAPI IFileOperation_Constructor(IUnknown *outer, REFIID riid, void **o
 
     return hr;
 }
+

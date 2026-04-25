@@ -994,8 +994,16 @@ static void register_fake_dll( const WCHAR *name, const void *data, size_t size,
     if (!registrar)
     {
         HRESULT (WINAPI *pAtlCreateRegistrar)(IRegistrar**);
-        HMODULE atl = LoadLibraryW( L"atl100.dll" );
+        static int atl_load_failed;
+        HMODULE atl;
 
+        /* Cache first failure: during first-boot prefix population atl100.dll
+         * often can't load cleanly (dependency cold-start). Every fake DLL
+         * with a WINE_REGISTRY resource would otherwise retry LoadLibraryW
+         * hundreds of times and spam the log. One ERR is enough. */
+        if (atl_load_failed) return;
+
+        atl = LoadLibraryW( L"atl100.dll" );
         if ((pAtlCreateRegistrar = (void *)GetProcAddress( atl, "AtlCreateRegistrar" )))
             hr = pAtlCreateRegistrar( &registrar );
         else
@@ -1003,7 +1011,8 @@ static void register_fake_dll( const WCHAR *name, const void *data, size_t size,
 
         if (!registrar)
         {
-            ERR( "failed to create IRegistrar: %lx\n", hr );
+            ERR( "failed to create IRegistrar: %lx (further atl100.dll loads suppressed)\n", hr );
+            atl_load_failed = 1;
             return;
         }
     }

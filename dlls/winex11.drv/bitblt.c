@@ -39,7 +39,11 @@
 #ifdef HAVE_X11_EXTENSIONS_XSHM_H
 # include <X11/extensions/XShm.h>
 # ifdef HAVE_SYS_SHM_H
+#ifdef __ANDROID__
+#  include "../../android/android_sysvshm/sys/shm.h"
+#else
 #  include <sys/shm.h>
+#endif
 # endif
 # ifdef HAVE_SYS_IPC_H
 #  include <sys/ipc.h>

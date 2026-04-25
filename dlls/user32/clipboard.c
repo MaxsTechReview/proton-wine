@@ -25,6 +25,7 @@
 
 #define COBJMACROS
 #include <assert.h>
+#include <winsock2.h>
 #include "user_private.h"
 #include "winnls.h"
 #include "objidl.h"
@@ -45,6 +46,135 @@ static CRITICAL_SECTION_DEBUG critsect_debug =
 static CRITICAL_SECTION clipboard_cs = { &critsect_debug, -1, 0, 0, 0, 0 };
 static IDataObject *dnd_data_object;
 
+typedef struct {
+    int request_code;
+    int format;
+    int size;
+    void *data;
+} android_clipboard_data_t;
+
+static int send_android_clipboard_data(android_clipboard_data_t clipboard_data) {
+    WSADATA data;
+    SOCKET sock_fd;
+    struct sockaddr_in addr;
+    int net_requestcode, net_data_format, net_data_size;
+    int ret;
+
+    if ((ret = WSAStartup(MAKEWORD(2,2), &data)) != 0) {
+        TRACE( "WSAStartup failed with error %d\n", ret );
+        return 0;
+    }
+    sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd == INVALID_SOCKET) {
+        TRACE( "Failed to create client socket\n" );
+        return 0;
+    }
+    ZeroMemory(&addr, sizeof(addr));
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(20000);
+    ret = connect(sock_fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (ret == SOCKET_ERROR) {
+        TRACE( "Failed to connect to server\n" );
+        return 0;
+    }
+    net_requestcode = htonl(clipboard_data.request_code);
+    net_data_format = htonl(clipboard_data.format);
+    net_data_size = htonl(clipboard_data.size);
+    ret = send(sock_fd, &net_requestcode, sizeof(net_requestcode), 0);
+    if (ret == SOCKET_ERROR) {
+        TRACE( "Failed to send request code\n" );
+        return 0;
+    }
+    ret = send(sock_fd, &net_data_format, sizeof(net_data_format), 0);
+    if (ret == SOCKET_ERROR) {
+        TRACE( "Failed to send Windows clipboard data format\n" );
+        return 0;
+    }
+    ret = send(sock_fd, &net_data_size, sizeof(net_data_size), 0);
+    if (ret == SOCKET_ERROR) {
+        TRACE( "Failed to send Windows clipboard data size\n" );
+        return 0;
+    }
+    ret = send(sock_fd, clipboard_data.data, clipboard_data.size, 0);
+    if (ret == SOCKET_ERROR) {
+        TRACE( "Failed to send Windows clipboard data\n" );
+        return 0;
+    }
+
+    ret = closesocket(sock_fd);
+    if (ret == SOCKET_ERROR) {
+        TRACE( "Failed to close socket\n" );
+        return 0;
+    }
+
+    WSACleanup();
+
+    return 1;
+}
+
+static android_clipboard_data_t receive_android_clipboard_data() {
+    WSADATA data;
+    android_clipboard_data_t clipboard_data = {0};
+    SOCKET sock_fd;
+    struct sockaddr_in addr;
+    int net_requestcode, net_data_format, net_data_size;
+    int ret;
+
+    if ((ret = WSAStartup(MAKEWORD(2,2), &data)) != 0) {
+        TRACE( "WSAStartup failed with error %d\n", ret );
+    }
+
+    sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd == INVALID_SOCKET) {
+        TRACE( "Failed to create client socket\n" );
+    }
+    ZeroMemory(&addr, sizeof(addr));
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(20000);
+
+    ret = connect(sock_fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (ret == SOCKET_ERROR) {
+        TRACE( "Failed to connect to server\n" );
+    }
+
+    clipboard_data.request_code = 3;
+    net_requestcode = htonl(clipboard_data.request_code);
+
+    ret = send(sock_fd, &net_requestcode, sizeof(net_requestcode), 0);
+    if (ret == SOCKET_ERROR) {
+        TRACE( "Failed to send request code\n" );
+    }
+    ret = recv(sock_fd, &net_data_format, sizeof(net_data_format), 0);
+    if (ret == SOCKET_ERROR) {
+        TRACE( "Failed to receive Android clipboard data format\n" );
+    }
+    ret = recv(sock_fd, &net_data_size, sizeof(net_data_size), 0);
+    if (ret == SOCKET_ERROR) {
+        TRACE( "Failed to receive Android clipboard data size\n" );
+    }
+
+    clipboard_data.format = ntohl(net_data_format);
+    clipboard_data.size = ntohl(net_data_size);
+    clipboard_data.data = malloc(clipboard_data.size);
+
+    ret = recv(sock_fd, clipboard_data.data, clipboard_data.size, 0);
+    if (ret == SOCKET_ERROR) {
+        TRACE( "Failed to receive Android clipboard data\n" );
+    }
+
+
+    ret = closesocket(sock_fd);
+    if (ret == SOCKET_ERROR) {
+           TRACE( "Failed to close socket\n" );
+
+    }
+
+    WSACleanup();
+
+    return clipboard_data;
+}
 
 /* platform-independent version of METAFILEPICT */
 struct metafile_pict
@@ -601,6 +731,7 @@ HANDLE WINAPI SetClipboardData( UINT format, HANDLE data )
     struct set_clipboard_params params = { .size = 0 };
     HANDLE handle = data;
     NTSTATUS status;
+    int wine_to_android_clipboard = getenv("WINE_TO_ANDROID_CLIPBOARD") && atoi(getenv("WINE_TO_ANDROID_CLIPBOARD"));
 
     TRACE( "%s %p\n", debugstr_format( format ), data );
 
@@ -611,6 +742,34 @@ HANDLE WINAPI SetClipboardData( UINT format, HANDLE data )
     }
 
     status = NtUserSetClipboardData( format, data, &params );
+
+    EnterCriticalSection( &clipboard_cs );
+
+    if (wine_to_android_clipboard) {
+        android_clipboard_data_t clipboard_data;
+        HANDLE hData;
+        struct get_clipboard_params get_params;
+        ZeroMemory(&clipboard_data, sizeof(clipboard_data));
+        clipboard_data.request_code = 2;
+        clipboard_data.format = CF_UNICODETEXT;
+        if (format != CF_UNICODETEXT) {
+            get_params.size = 1024;
+            get_params.data_size = 0;
+            get_params.data = GlobalAlloc( GMEM_FIXED, get_params.size );
+            hData = NtUserGetClipboardData(clipboard_data.format, &get_params);
+            clipboard_data.size = get_params.size;
+            clipboard_data.data = GlobalLock(hData);
+        } else {
+            clipboard_data.size = params.size;
+            clipboard_data.data = params.data;
+        }
+        if (!send_android_clipboard_data(clipboard_data))
+            TRACE( "Failed to send Windows clipboard data\n" );
+        if (hData) GlobalUnlock(hData);
+        if (get_params.data) GlobalFree(get_params.data);
+    }
+
+    LeaveCriticalSection( &clipboard_cs );
 
     if (params.data) GlobalUnlock( handle );
     if (handle != data) GlobalFree( handle );
@@ -630,8 +789,27 @@ HANDLE WINAPI GetClipboardData( UINT format )
 {
     struct get_clipboard_params params = { .data_size = 1024 };
     HANDLE ret = 0;
+    int wine_from_android_clipboard = getenv("WINE_FROM_ANDROID_CLIPBOARD") && atoi(getenv("WINE_FROM_ANDROID_CLIPBOARD"));
 
     EnterCriticalSection( &clipboard_cs );
+
+    if (wine_from_android_clipboard) {
+        struct set_clipboard_params set_params;
+        android_clipboard_data_t clipboard_data = receive_android_clipboard_data();
+        if (clipboard_data.data) {
+            ret = GlobalAlloc( GMEM_MOVEABLE, clipboard_data.size );
+            void *dst = GlobalLock(ret);
+            memcpy(dst, clipboard_data.data, clipboard_data.size);
+            GlobalUnlock(ret);
+            set_params.data = clipboard_data.data;
+            set_params.size = clipboard_data.size;
+            set_params.cache_only = FALSE;
+            NtUserEmptyClipboard();
+            NtUserSetClipboardData( clipboard_data.format, ret, &set_params );
+        }
+        else
+            TRACE( "Failed to receive Android clipboard data\n" );
+    }
 
     while (params.data_size)
     {

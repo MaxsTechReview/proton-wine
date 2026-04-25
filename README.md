@@ -1,171 +1,142 @@
-## INTRODUCTION
+## Proton 11 Arm64EC — Android build
 
-Wine is a program which allows running Microsoft Windows programs
-(including DOS, Windows 3.x, Win32, and Win64 executables) on Unix.
-It consists of a program loader which loads and executes a Microsoft
-Windows binary, and a library (called Winelib) that implements Windows
-API calls using their Unix, X11 or Mac equivalents.  The library may also
-be used for porting Windows code into native Unix executables.
+A Wine/Proton hybrid for Android, distributed as `.wcp` / `.wcp.xz`
+packages consumable by **WinNative**, **Winlator**, **CMOD**, and
+**Ludashi**.
 
-Wine is free software, released under the GNU LGPL; see the file
-LICENSE for the details.
+The base is Valve's Wine fork ([ValveSoftware/wine][valve-wine],
+`proton_11.0` branch). On top of that we apply an Android/Arm64EC port:
+cross-build scripts targeting the Android NDK +
+[bylaws/llvm-mingw][llvm-mingw] + a Termux aarch64 sysroot, runtime
+workarounds for Bionic and noexec-mounted filesystems, eventfd-backed
+esync/fsync synchronisation, and ADPF v2 performance-hint integration.
 
+Steam support is provided by the Windows Steam client running inside
+the prefix, so we do not ship Valve's `lsteamclient.dll` — the Windows
+Steam runtime provides its own.
 
-## QUICK START
-
-From the top-level directory of the Wine source (which contains this file),
-run:
-
-```
-./configure
-make
-```
-
-Then either install Wine:
-
-```
-make install
-```
-
-Or run Wine directly from the build directory:
-
-```
-./wine notepad
-```
-
-Run programs as `wine program`. For more information and problem
-resolution, read the rest of this file, the Wine man page, and
-especially the wealth of information found at https://www.winehq.org.
+[valve-wine]: https://github.com/ValveSoftware/wine/tree/proton_11.0
+[llvm-mingw]: https://github.com/bylaws/llvm-mingw
 
 
-## REQUIREMENTS
+## What's in here
 
-To compile and run Wine, you must have one of the following:
-
-- Linux version 2.6.22 or later
-- FreeBSD 12.4 or later
-- Solaris x86 9 or later
-- NetBSD-current
-- macOS 10.12 or later
-
-As Wine requires kernel-level thread support to run, only the operating
-systems mentioned above are supported.  Other operating systems which
-support kernel threads may be supported in the future.
-
-**FreeBSD info**:
-  See https://wiki.freebsd.org/Wine for more information.
-
-**Solaris info**:
-  You will most likely need to build Wine with the GNU toolchain
-  (gcc, gas, etc.). Warning : installing gas does *not* ensure that it
-  will be used by gcc. Recompiling gcc after installing gas or
-  symlinking cc, as and ld to the gnu tools is said to be necessary.
-
-**NetBSD info**:
-  Make sure you have the USER_LDT, SYSVSHM, SYSVSEM, and SYSVMSG options
-  turned on in your kernel.
-
-**macOS info**:
-  You need Xcode/Xcode Command Line Tools or Apple cctools.  The
-  minimum requirements for compiling Wine are clang 3.8 with the
-  MacOSX10.13.sdk and mingw-w64 v12 for 32-bit wine.  The
-  MacOSX10.14.sdk and later can build 64-bit wine.
-
-**Supported file systems**:
-  Wine should run on most file systems. A few compatibility problems
-  have also been reported using files accessed through Samba. Also,
-  NTFS does not provide all the file system features needed by some
-  applications.  Using a native Unix file system is recommended.
-
-**Basic requirements**:
-  You need to have the X11 development include files installed
-  (called xorg-dev in Debian and libX11-devel in Red Hat).
-  Of course you also need make (most likely GNU make).
-  You also need flex version 2.5.33 or later and bison.
-
-**Optional support libraries**:
-  Configure will display notices when optional libraries are not found
-  on your system. See https://gitlab.winehq.org/wine/wine/-/wikis/Building-Wine
-  for hints about the packages you should install. On 64-bit
-  platforms, you have to make sure to install the 32-bit versions of
-  these libraries.
+- `android/` — `android_sysvshm/` (userspace SysV SHM emulation for
+  Bionic), `shm_utils/` (`shm_open` redirection), and `patches/` (a
+  reference patch set of the Android-side source modifications).
+- `build-scripts/` — staged cross-build orchestration:
+  `build-step0.sh` builds `wine-tools` on the host, and
+  `build-step-arm64ec.sh` / `build-step-x86_64.sh` configure, build and
+  install the target-arch Wine tree against the NDK and llvm-mingw.
+- `scripts/package-esync-wcp.sh` — turns an installed Wine tree into
+  the two Winlator-compatible archives:
+  - `<prefix>.wcp` — type `Proton`, consumed by WinNative
+  - `<prefix>.wcp.xz` — type `Proton`, consumed by
+    Winlator / CMOD / Ludashi
+- `resources/prefixPack-arm64ec.txz` — the prefix pack that packagers
+  bundle into the final `.wcp`, so no external download is required
+  at build time.
+- `.github/workflows/build-arm64ec.yml` — CI that reproduces the local
+  build on `ubuntu-24.04`, caches the NDK / llvm-mingw / Termux
+  sysroot, runs the build, and uploads the resulting `.wcp` files as
+  workflow artifacts (and as release assets on tagged builds).
 
 
-## COMPILATION
+## Notable runtime changes
 
-To build Wine, do:
+- **`dlls/ntdll/unix/virtual.c`** — Android filesystems that are mounted
+  `noexec` reject `mprotect(PROT_EXEC)` on file-backed pages, which
+  caused silent image-mapping failures. Added an anonymous-RWX fallback
+  that remaps the section when `PROT_EXEC` returns `EACCES`.
+- **`dlls/ntdll/unix/loader.c`** — Android-only defaults for
+  `WINE_ADPF=8` and
+  `VKD3D_CONFIG=virtual_heaps,no_upload_hvv` (`setenv` with
+  `overwrite=0`, so anything the user exports still wins). ADPF v2
+  integration via `libandroid`'s `APerformanceHint_*` APIs.
+  `WINESTEAMNOEXEC` now defaults to `1` on Android (explicit
+  `WINESTEAMNOEXEC=0` still disables it).
+- **`dlls/ntdll/unix/esync.c` / `server/esync.c`** — eventfd-backed
+  synchronisation primitives used throughout the port.
+- **`dlls/ntdll/loader.c`** — `DllMain` failures stay fatal, but
+  `load_dll` failures are demoted to `WARN` so late-bound Steam overlay
+  DLLs don't produce noisy false fatals.
+- **`dlls/user32/Makefile.in`** — `ws2_32` moved to `DELAYIMPORTS` so
+  `wineboot` doesn't hang behind socket init on Android.
+- **`dlls/winex11.drv/opengl.c`** — `WINE_X11FORCEGLX` env parsing fix.
+
+See the individual files and `android/patches/*.patch` for the full
+set of source-level changes.
+
+
+## Building locally
+
+Host requirements: Ubuntu 24.04 (or equivalent), the Android NDK r27d,
+[bylaws/llvm-mingw][llvm-mingw] `20250920-ucrt`, and a Termux
+aarch64 sysroot unpacked at `~/termuxfs/aarch64/`.
 
 ```
-./configure
-make
+bash autogen.sh
+bash build-scripts/build-step0.sh
+bash build-scripts/build-step-arm64ec.sh --build-sysvshm
+bash build-scripts/build-step-arm64ec.sh --configure
+bash build-scripts/build-step-arm64ec.sh --build
+bash build-scripts/build-step-arm64ec.sh --install
+bash scripts/package-esync-wcp.sh \
+  "$HOME/compiled-files-aarch64-esync-perf-lto" \
+  "./dist/proton-11.0-arm64ec-$(date -u +%Y%m%d-%H%M)" \
+  "proton-11.0-arm64ec" \
+  "11" \
+  "Proton 11 Arm64EC"
 ```
 
-This will build the program "wine" and numerous support libraries/binaries.
-The program "wine" will load and run Windows executables.
-The library "libwine" ("Winelib") can be used to compile and link
-Windows source code under Unix.
-
-To see compile configuration options, do `./configure --help`.
-
-For more information, see https://gitlab.winehq.org/wine/wine/-/wikis/Building-Wine
+The build scripts hardcode paths for a specific layout
+(`/home/max`, `/data/data/com.winnative.cmod/files/imagefs/...`); the CI
+workflow pre-creates those directories on the runner so the same
+scripts can run unchanged.
 
 
-## SETUP
+## Building in CI
 
-Once Wine has been built correctly, you can do `make install`; this
-will install the wine executable and libraries, the Wine man page, and
-other needed files.
-
-Don't forget to uninstall any conflicting previous Wine installation
-first.  Try either `dpkg -r wine` or `rpm -e wine` or `make uninstall`
-before installing.
-
-Once installed, you can run the `winecfg` configuration tool. See the
-Support area at https://www.winehq.org/ for configuration hints.
+The workflow is dispatched automatically on every push to
+`proton_11.0` and on tags matching `v*`; it can also be run manually
+via **Actions → Build Proton Wine Arm64EC → Run workflow**. Artifacts
+are uploaded as `proton-11.0-arm64ec-<run>.wcp` and
+`proton-11.0-arm64ec-<run>.wcp.xz` with a 30-day retention window. Tag
+pushes additionally create a GitHub release with the same files.
 
 
-## RUNNING PROGRAMS
+## Packaging details
 
-When invoking Wine, you may specify the entire path to the executable,
-or a filename only.
+The packager produces two archives from one installed tree. Both are
+xz-compressed tars (not zstd — matches what Winlator's content
+installer expects). `bin/wine` is rewritten as a shell-script wrapper
+that `exec`s `lib/wine/aarch64-unix/wine` so `/proc/self/exe` resolves
+next to `ntdll.so`. Everything in `bin/` is real binaries or real
+shell scripts — never symlinks, which would break extraction on
+Android scoped storage and FAT32 SD cards.
 
-For example, to run Notepad:
+`profile.json` fields:
 
-```
-wine notepad            (using the search Path as specified in
-wine notepad.exe         the registry to locate the file)
-
-wine c:\\windows\\notepad.exe      (using DOS filename syntax)
-
-wine ~/.wine/drive_c/windows/notepad.exe  (using Unix filename syntax)
-
-wine notepad.exe readme.txt          (calling program with parameters)
-```
-
-Wine is not perfect, so some programs may crash. If that happens you
-will get a crash log that you should attach to your report when filing
-a bug.
+- `type: Proton`
+- `versionName: proton-11.0-arm64ec` — matches Ludashi's `WineInfo`
+  regex `^(wine|proton)-([0-9.]+)-?([0-9.]+)?-(x86|x86_64|arm64ec)$`
+- `versionCode: 11` — fixed for the Proton 11 line
+- `description: "Proton 11 Arm64EC by WinNative <HHMM>"` — the `<HHMM>`
+  suffix is the build timestamp the packager emits.
 
 
-## GETTING MORE INFORMATION
+## Credits
 
-- **WWW**: A great deal of information about Wine is available from WineHQ at
-	https://www.winehq.org/ : various Wine Guides, application database,
-	bug tracking. This is probably the best starting point.
+- [ValveSoftware/wine][valve-wine] — base Wine tree, full commit
+  history preserved on the `proton_11.0` branch.
+- [bylaws/llvm-mingw][llvm-mingw] — ucrt64 toolchain used to compile
+  the PE side of the build, including Arm64EC support.
+- Upstream [Wine][winehq] authors (see `AUTHORS`).
 
-- **FAQ**: The Wine FAQ is located at https://gitlab.winehq.org/wine/wine/-/wikis/FAQ
+[winehq]: https://www.winehq.org/
 
-- **Wiki**: The Wine Wiki is located at https://gitlab.winehq.org/wine/wine/-/wikis/
 
-- **Gitlab**: Wine development is hosted at https://gitlab.winehq.org
+## License
 
-- **Mailing lists**:
-	There are several mailing lists for Wine users and developers; see
-	https://gitlab.winehq.org/wine/wine/-/wikis/Forums for more
-	information.
-
-- **Bugs**: Report bugs to Wine Bugzilla at https://bugs.winehq.org
-	Please search the bugzilla database to check whether your
-	problem is already known or fixed before posting a bug report.
-
-- **IRC**: Online help is available at channel `#WineHQ` on irc.libera.chat.
+Wine is distributed under the GNU LGPL 2.1-or-later; see `LICENSE`.
+The Android port follows the same license as the code it modifies.

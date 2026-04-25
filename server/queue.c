@@ -45,6 +45,18 @@
 #include "process.h"
 #include "request.h"
 #include "user.h"
+#include "esync.h"
+
+static int wn_sync_trace_enabled(void)
+{
+    static int cached = -1;
+    if (cached == -1)
+    {
+        const char *e = getenv( "WN_SYNC_TRACE" );
+        cached = e && atoi( e ) > 0;
+    }
+    return cached;
+}
 
 #define QS_DRIVER       0x80000000
 #define QS_HARDWARE     0x40000000
@@ -149,6 +161,8 @@ struct msg_queue
     struct thread_input   *input;           /* thread input descriptor */
     struct hook_table     *hooks;           /* hook table */
     int                    keystate_lock;   /* owns an input keystate lock */
+    int                    esync_fd;        /* esync file descriptor (signalled on message) */
+    int                    esync_in_msgwait; /* our thread is currently waiting on us */
     queue_shm_t           *shared;          /* queue in session shared memory */
 };
 
@@ -164,6 +178,7 @@ struct hotkey
 
 static void msg_queue_dump( struct object *obj, int verbose );
 static struct object *msg_queue_get_sync( struct object *obj );
+static int msg_queue_get_esync_fd( struct object *obj, enum esync_type *type );
 static void msg_queue_destroy( struct object *obj );
 static void msg_queue_poll_event( struct fd *fd, int event );
 static void thread_input_dump( struct object *obj, int verbose );
@@ -192,7 +207,8 @@ static const struct object_ops msg_queue_ops =
     no_open_file,              /* open_file */
     no_kernel_obj_list,        /* get_kernel_obj_list */
     no_close_handle,           /* close_handle */
-    msg_queue_destroy          /* destroy */
+    msg_queue_destroy,         /* destroy */
+    msg_queue_get_esync_fd,    /* get_esync_fd */
 };
 
 static const struct fd_ops msg_queue_fd_ops =
@@ -230,7 +246,8 @@ static const struct object_ops thread_input_ops =
     no_open_file,                 /* open_file */
     no_kernel_obj_list,           /* get_kernel_obj_list */
     no_close_handle,              /* close_handle */
-    thread_input_destroy          /* destroy */
+    thread_input_destroy,         /* destroy */
+    NULL,                         /* get_esync_fd */
 };
 
 /* pointer to input structure of foreground thread */
@@ -331,6 +348,8 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
         queue->input           = (struct thread_input *)grab_object( input );
         queue->hooks           = NULL;
         queue->keystate_lock   = 0;
+        queue->esync_fd        = -1;
+        queue->esync_in_msgwait = 0;
         list_init( &queue->send_result );
         list_init( &queue->callback_result );
         list_init( &queue->pending_timers );
@@ -338,6 +357,10 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
         for (i = 0; i < NB_MSG_KINDS; i++) list_init( &queue->msg_list[i] );
 
         if (!(queue->sync = create_internal_sync( 1, 0 ))) goto error;
+
+        if (do_esync())
+            queue->esync_fd = esync_create_fd( 0, 0 );
+
         if (!(queue->shared = alloc_shared_object( sizeof(*queue->shared) )))
         {
             release_object( queue );
@@ -763,6 +786,15 @@ static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
     SHARED_WRITE_END;
 
     if (get_queue_status( queue )) signal_sync( queue->sync );
+
+    if (wn_sync_trace_enabled())
+    {
+        queue_shm_t *qshm = queue->shared;
+        fprintf( stderr, "WN_SYNC_TRACE: set_queue_bits queue=%p cur_tid=%04x bits=%08x wake_bits=%08x wake_mask=%08x changed_bits=%08x changed_mask=%08x signaled=%d\n",
+                 queue, current ? (unsigned)get_thread_id( current ) : 0u,
+                 bits, qshm->wake_bits, qshm->wake_mask, qshm->changed_bits, qshm->changed_mask,
+                 !!get_queue_status( queue ) );
+    }
 }
 
 /* clear some queue bits */
@@ -788,6 +820,18 @@ static inline void clear_queue_bits( struct msg_queue *queue, unsigned int bits 
         queue->keystate_lock = 0;
     }
     if (!get_queue_status( queue )) reset_sync( queue->sync );
+
+    if (do_esync() && !get_queue_status( queue ))
+        esync_clear( queue->esync_fd );
+
+    if (wn_sync_trace_enabled())
+    {
+        queue_shm_t *qshm = queue->shared;
+        fprintf( stderr, "WN_SYNC_TRACE: clear_queue_bits queue=%p cur_tid=%04x wake_bits=%08x wake_mask=%08x changed_bits=%08x changed_mask=%08x signaled=%d\n",
+                 queue, current ? (unsigned)get_thread_id( current ) : 0u,
+                 qshm->wake_bits, qshm->wake_mask, qshm->changed_bits, qshm->changed_mask,
+                 !!get_queue_status( queue ) );
+    }
 }
 
 /* check if message is matched by the filter */
@@ -1326,6 +1370,9 @@ static void cleanup_results( struct msg_queue *queue )
 /* check if the thread owning the queue is hung (not checking for messages) */
 static int is_queue_hung( struct msg_queue *queue )
 {
+    if (do_esync() && queue->esync_in_msgwait)
+        return 0;   /* thread is waiting on queue in absentia -> not hung */
+
     /* queue is hung if it's signaled and thread didn't access it for more than 5 seconds */
     return get_queue_status( queue ) && monotonic_time - queue->shared->access_time > 5 * TICKS_PER_SEC;
 }
@@ -1335,6 +1382,16 @@ static struct object *msg_queue_get_sync( struct object *obj )
     struct msg_queue *queue = (struct msg_queue *)obj;
     assert( obj->ops == &msg_queue_ops );
     return grab_object( queue->sync );
+}
+
+static int msg_queue_get_esync_fd( struct object *obj, enum esync_type *type )
+{
+    struct msg_queue *queue = (struct msg_queue *)obj;
+    /* WinNative: route through sync's esync_fd; falls back to own fd */
+    int fd = sync_get_esync_fd( queue->sync, type );
+    if (fd != -1) { *type = ESYNC_QUEUE; return fd; }
+    *type = ESYNC_QUEUE;
+    return queue->esync_fd;
 }
 
 static void msg_queue_dump( struct object *obj, int verbose )
@@ -1389,6 +1446,7 @@ static void msg_queue_destroy( struct object *obj )
     if (queue->fd) release_object( queue->fd );
     if (queue->shared) free_shared_object( queue->shared );
     if (queue->sync) release_object( queue->sync );
+    if (do_esync()) close( queue->esync_fd );
 }
 
 static void msg_queue_poll_event( struct fd *fd, int event )
@@ -3267,6 +3325,13 @@ DECL_HANDLER(set_queue_mask)
 
     if (!get_queue_status( queue )) reset_sync( queue->sync );
     else signal_sync( queue->sync );
+
+    if (wn_sync_trace_enabled())
+        fprintf( stderr, "WN_SYNC_TRACE: set_queue_mask queue=%p cur_tid=%04x req_wake_mask=%08x req_changed_mask=%08x wake_bits=%08x changed_bits=%08x signaled=%d\n",
+                 queue, current ? (unsigned)get_thread_id( current ) : 0u,
+                 (unsigned)req->wake_mask, (unsigned)req->changed_mask,
+                 queue_shm->wake_bits, queue_shm->changed_bits,
+                 !!get_queue_status( queue ) );
 }
 
 
@@ -3288,6 +3353,9 @@ DECL_HANDLER(get_queue_status)
     SHARED_WRITE_END;
 
     if (!get_queue_status( queue )) reset_sync( queue->sync );
+
+    if (do_esync() && !get_queue_status( queue ))
+        esync_clear( queue->esync_fd );
 }
 
 
@@ -3489,6 +3557,9 @@ DECL_HANDLER(get_message)
 
     if (!get_queue_status( queue )) reset_sync( queue->sync );
 
+    if (do_esync() && !get_queue_status( queue ))
+        esync_clear( queue->esync_fd );
+
     /* then check for posted messages */
     if ((filter & QS_POSTMESSAGE) &&
         get_posted_message( queue, get_win, req->get_first, req->get_last, req->flags, reply ))
@@ -3547,6 +3618,9 @@ DECL_HANDLER(get_message)
     if (!get_queue_status( queue )) reset_sync( queue->sync );
     else signal_sync( queue->sync );
     set_error( STATUS_PENDING );  /* FIXME */
+
+    if (do_esync() && !get_queue_status( queue ))
+        esync_clear( queue->esync_fd );
 }
 
 
@@ -4370,4 +4444,12 @@ DECL_HANDLER(track_mouse_from_pointer)
         reply->cursor_pos_updated = queue->input->pointer_state.cursor_pos_updated;
         queue->input->pointer_state.cursor_pos_updated = 0;
     }
+}
+
+DECL_HANDLER(esync_msgwait)
+{
+    struct msg_queue *queue = get_current_queue();
+
+    if (!queue) return;
+    queue->esync_in_msgwait = req->in_msgwait;
 }

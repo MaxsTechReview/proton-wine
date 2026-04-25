@@ -34,6 +34,8 @@ extern int do_fsync_cached;
 
 static inline int do_fsync(void)
 {
-    if (do_fsync_cached != -1) return do_fsync_cached;
-    return (do_fsync_cached = fsync_check_support());
+    /* WinNative: FSync disabled unconditionally — see dlls/ntdll/unix/fsync.h
+     * for rationale. Keep fsync_check_support() available so fsync.c compiles
+     * cleanly, but do_fsync() as a gate is hard-wired to 0. */
+    return 0;
 }

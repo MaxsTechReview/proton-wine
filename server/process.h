@@ -88,6 +88,7 @@ struct process
     struct list          rawinput_entry;  /* entry in the rawinput process list */
     struct list          kernel_object;   /* list of kernel object pointers */
     struct pe_image_info image_info;      /* main exe image info */
+    int                  esync_fd;        /* esync file descriptor (signaled on exit) */
     struct cpu_topology_override cpu_override; /* Overridden CPUs to host CPUs mapping. */
     unsigned char   wine_cpu_id_from_host[64]; /* Host to overridden CPU mapping. */
 };

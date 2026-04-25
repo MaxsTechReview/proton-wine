@@ -1102,14 +1102,34 @@ NTSTATUS sdl_bus_init(void *args)
 {
     const char *mapping;
     int i;
+    const char *sdl_paths[] = {
+        "libSDL2-2.0.so.0", /* WinNative used SDL */
+        "libSDL2-2.0.so",
+        "libSDL2.so",
+        SONAME_LIBSDL2,              /* Standard: libSDL2-2.0.so */
+        NULL
+    };
+    const char **path;
 
     TRACE("args %p\n", args);
 
     options = (struct bus_options *)args;
 
-    if (!(sdl_handle = dlopen(SONAME_LIBSDL2, RTLD_NOW)))
+    /* Try multiple paths to find SDL library */
+    for (path = sdl_paths; *path; path++)
     {
-        WARN("could not load %s\n", SONAME_LIBSDL2);
+        TRACE("Trying to load SDL from: %s\n", *path);
+        if ((sdl_handle = dlopen(*path, RTLD_NOW)))
+        {
+            TRACE("Successfully loaded SDL from: %s\n", *path);
+            break;
+        }
+        TRACE("Failed to load %s: %s\n", *path, dlerror());
+    }
+
+    if (!sdl_handle)
+    {
+        WARN("Could not load SDL from any known path\n");
         return STATUS_UNSUCCESSFUL;
     }
 #define LOAD_FUNCPTR(f)                          \

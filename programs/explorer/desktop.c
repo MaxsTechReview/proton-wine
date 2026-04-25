@@ -40,7 +40,11 @@ WINE_DEFAULT_DEBUG_CHANNEL(explorer);
 #define DESKTOP_CLASS_ATOM ((LPCWSTR)MAKEINTATOM(32769))
 #define DESKTOP_ALL_ACCESS 0x01ff
 
+#ifdef __APPLE__
 static const WCHAR default_driver[] = L"mac,x11,wayland";
+#else
+static const WCHAR default_driver[] = L"x11,wayland";
+#endif
 
 static BOOL using_root = TRUE;
 
@@ -1344,6 +1348,16 @@ void manage_desktop( WCHAR *arg )
         }
         SetThreadDesktop( desktop );
     }
+#if defined(__ANDROID__) || defined(__aarch64__)
+    else
+    {
+        int wine_no_duplicate_explorer = getenv("WINE_NO_DUPLICATE_EXPLORER") && atoi(getenv("WINE_NO_DUPLICATE_EXPLORER"));
+        if (wine_no_duplicate_explorer == 1)
+        {
+            ExitProcess( 0 );
+        }
+    }
+#endif
 
     /* the desktop process should always have an admin token */
     status = NtSetInformationProcess( GetCurrentProcess(), ProcessWineGrantAdminToken, NULL, 0 );

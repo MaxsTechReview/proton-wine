@@ -1864,7 +1864,9 @@ static void init_supported_machines(void)
     {
         supported_machines[count++] = IMAGE_FILE_MACHINE_ARM64;
         supported_machines[count++] = IMAGE_FILE_MACHINE_I386;
-        supported_machines[count++] = IMAGE_FILE_MACHINE_ARMNT;
+        /* WinNative: we do not build an ARM32 userland (sysarm32 is empty).
+         * Advertising ARMNT here makes wineboot launch sysarm32\rundll32.exe
+         * which fails with c0000135. Drop ARMNT until arm32 is built. */
     }
 #else
 #error Unsupported machine

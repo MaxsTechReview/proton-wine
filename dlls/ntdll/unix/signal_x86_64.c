@@ -2153,6 +2153,7 @@ static void install_bpf(struct sigaction *sig_act)
     struct sock_fprog prog;
     NTSTATUS status;
 
+#ifndef __ANDROID__
     if ((ULONG_PTR)sc_seccomp < NATIVE_SYSCALL_ADDRESS_START
             || (ULONG_PTR)syscall < NATIVE_SYSCALL_ADDRESS_START)
     {
@@ -2161,15 +2162,22 @@ static void install_bpf(struct sigaction *sig_act)
         ERR_(seh)("The known reasons are /proc/sys/vm/legacy_va_layout set to 1 or 'ulimit -s' being 'unlimited'.\n");
         return;
     }
+#endif
 
     sig_act->sa_sigaction = sigsys_handler;
     memset(&prog, 0, sizeof(prog));
 
     sigaction(SIGSYS, sig_act, NULL);
 
+#ifndef __ANDROID__
     test_syscall = mmap((void *)0x600000000000, 0x1000, PROT_EXEC | PROT_READ | PROT_WRITE,
             MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANON, -1, 0);
     if (test_syscall != (void *)0x600000000000)
+#else
+    test_syscall = mmap(NULL, 0x1000, PROT_EXEC | PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (test_syscall == MAP_FAILED)
+#endif
     {
         int ret;
 
@@ -2279,7 +2287,14 @@ __ASM_GLOBAL_FUNC( dump_syscall_fault_return,
                    "movq %rdi,%rsp\n\t"
                    "movq %rsi,%rax\n\t"
                    "movq %rdx,%r13\n\t"
-                   "jmp %rcx")
+                   /* indirect jump through register; the bare 'jmp %rcx'
+                    * is accepted as shorthand by gas but rejected by
+                    * clang's integrated assembler when the build host
+                    * actually targets x86_64 (the cross-build to
+                    * arm64ec-windows never processes this asm). Spell
+                    * out the canonical AT&T indirect form so both
+                    * assemble cleanly. */
+                   "jmp *%rcx")
 
 
 static void dump_syscall_fault( CONTEXT *context, DWORD exc_code )
