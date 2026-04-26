@@ -78,21 +78,29 @@ int do_esync(void)
     if (esync_runtime_disabled) return 0;
     if (do_esync_cached == -1)
     {
-        /* Sync-mode arbitration (single mechanism active at a time):
-         *  1. If the server latched an in-proc sync device (NTSync or
-         *     FSYNC_USED_BY_SERVER sentinel), ESync is disabled — NTSync wins.
-         *  2. Else honor WINEESYNC=1 for explicit opt-in.
-         *  3. Else (WINEESYNC unset, no NTSync) auto-enable ESync as the
-         *     performant fallback. WINEESYNC=0 forces it off. */
+        /* Sync-mode arbitration (strict opt-in — never auto-enable):
+         *  1. If the server latched an in-proc sync device (NTSync via
+         *     /dev/ntsync, or the FSYNC_USED_BY_SERVER sentinel), ESync
+         *     is disabled — NTSync/FSync wins. The server probes
+         *     /dev/ntsync only when WINENTSYNC=1, so this branch is
+         *     reached only on the user's explicit NTSync opt-in.
+         *  2. Else, ESync is on iff WINEESYNC=1. Unset or 0 → off.
+         *
+         * Combined matrix (with the server-side WINENTSYNC gate):
+         *   WINENTSYNC=1, /dev/ntsync ok           → NTSync (ESync off).
+         *   WINENTSYNC=1, /dev/ntsync absent, WINEESYNC=1
+         *                                          → ESync (fallback).
+         *   WINENTSYNC=1, /dev/ntsync absent, WINEESYNC unset/0
+         *                                          → server-side only.
+         *   WINENTSYNC unset/0, WINEESYNC=1        → ESync.
+         *   WINENTSYNC unset/0, WINEESYNC unset/0  → server-side only. */
         const char *env = getenv("WINEESYNC");
         int ntsync_active = (inproc_device_fd >= 0);
 
         if (ntsync_active)
             do_esync_cached = 0;
-        else if (env)
-            do_esync_cached = atoi(env) > 0;
         else
-            do_esync_cached = !do_fsync();
+            do_esync_cached = env && atoi(env) > 0;
     }
 
     return do_esync_cached;

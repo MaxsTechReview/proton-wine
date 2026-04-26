@@ -349,13 +349,31 @@ struct fd *load_intl_file(void)
         free( path );
     }
     if (!fd && getenv("XDG_DATA_DIRS")) {
-        char *share_dir = getenv("XDG_DATA_DIRS");
-        char *path = malloc(strlen(share_dir) + strlen("/l_intl.nls") + 1);
-        sprintf(path, "%s/%s", share_dir, "wine/nls/l_intl.nls");
-        fd = open_fd( NULL, path, nt_name, O_RDONLY, &mode, FILE_READ_DATA,
-                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                      FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
-        free ( path );
+        /* XDG_DATA_DIRS is a colon-separated list; try each directory.
+         * The earlier inline version allocated space for "/l_intl.nls"
+         * but then sprintf'd "wine/nls/l_intl.nls" (8-byte heap
+         * overflow), and passed the whole colon-joined string as one
+         * path so the open could only succeed in the never-real case
+         * where the first dir embedded a colon. Both bugs fixed here. */
+        char *xdg_dirs = strdup( getenv("XDG_DATA_DIRS") );
+        if (xdg_dirs)
+        {
+            char *saveptr = NULL, *path = NULL;
+            char *dir = strtok_r( xdg_dirs, ":", &saveptr );
+            while (dir && !fd)
+            {
+                if (asprintf( &path, "%s/wine/nls/l_intl.nls", dir ) != -1)
+                {
+                    fd = open_fd( NULL, path, nt_name, O_RDONLY, &mode, FILE_READ_DATA,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
+                    free( path );
+                    path = NULL;
+                }
+                dir = strtok_r( NULL, ":", &saveptr );
+            }
+            free( xdg_dirs );
+        }
     }
     if (!fd) fatal_error( "failed to load l_intl.nls\n" );
     unix_fd = get_unix_fd( fd );

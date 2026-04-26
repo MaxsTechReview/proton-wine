@@ -2,11 +2,7 @@
 
 export TOOLCHAIN=$HOME/Android/android-ndk-r27d/toolchains/llvm/prebuilt/linux-x86_64/bin
 export TOOLCHAIN="$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin"
-# TARGET / extra flags can be overridden by the parent build script so the
-# .so matches the rest of the package's NDK API level and ELF alignment.
-# Default stays at API 28 / 4 KB pages for stand-alone invocations.
-: "${SYSVSHM_TARGET:=aarch64-linux-android28}"
-export TARGET="$SYSVSHM_TARGET"
+export TARGET=aarch64-linux-android28
 
 export CC="$TOOLCHAIN/$TARGET-clang"
 export AR="$TOOLCHAIN/llvm-ar"
@@ -17,14 +13,12 @@ OUTPUT_DIR="$SCRIPT_DIR/build-aarch64"
 
 mkdir -p "$OUTPUT_DIR"
 
-echo "Building android_sysvshm for aarch64 (target=$TARGET)..."
+echo "Building android_sysvshm for aarch64..."
 
 $CC -Wall -std=gnu99 -shared -fPIC \
     -I"$SCRIPT_DIR" \
-    ${SYSVSHM_CFLAGS:-} \
     -o "$OUTPUT_DIR/libandroid-sysvshm.so" \
-    "$SCRIPT_DIR/android_sysvshm.c" \
-    ${SYSVSHM_LDFLAGS:-}
+    "$SCRIPT_DIR/android_sysvshm.c"
 
 if [ $? -eq 0 ]; then
     echo "Build successful! Output: $OUTPUT_DIR/libandroid-sysvshm.so"

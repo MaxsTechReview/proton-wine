@@ -564,7 +564,17 @@ W32KAPI void window_surface_release( struct window_surface *surface )
     ULONG ret = InterlockedDecrement( &surface->ref );
     if (!ret)
     {
-        if (surface != &dummy_surface) pthread_mutex_destroy( &surface->mutex );
+        /* Don't pthread_mutex_destroy here. The add-ref-before-lock dance
+         * in window_surface_lock() narrows but does not close the race
+         * with concurrent lockers: another thread can still reach the
+         * lock between our refcount hitting 0 and the destroy below.
+         * pthread_mutex_destroy stamps Bionic's mutex memory with a
+         * "destroyed" tag, and a racing pthread_mutex_lock on that tag
+         * is a FORTIFY-fatal abort that takes the whole Wine process
+         * with it (instead of POSIX-undefined-but-survivable behaviour).
+         * Skipping destroy is safe: a userland pthread_mutex holds no
+         * kernel resources and the bytes are freed with the surface
+         * struct on the line below. */
         if (surface->clip_region) NtGdiDeleteObjectApp( surface->clip_region );
         if (surface->color_bitmap) NtGdiDeleteObjectApp( surface->color_bitmap );
         if (surface->shape_bitmap) NtGdiDeleteObjectApp( surface->shape_bitmap );

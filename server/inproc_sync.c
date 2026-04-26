@@ -50,37 +50,38 @@ int get_inproc_device_fd(void)
     static int fd = -2;
     if (fd == -2)
     {
-        /* Sync-mode selection (one-and-only-one active at a time):
-         *  - WINEESYNC=1         → strict ESync: skip /dev/ntsync probe entirely.
-         *  - WINENTSYNC=0        → explicit NTSync opt-out.
-         *  - PROTON_NO_NTSYNC=1  → legacy NTSync blocker.
-         *  - otherwise           → auto-probe /dev/ntsync. If present, NTSync
-         *                          wins and the client code disables ESync.
-         *                          If absent, client falls back to ESync. */
-        const char *esync_env  = getenv( "WINEESYNC" );
+        /* Sync-mode selection. Strict opt-in semantics — we never enable
+         * a sync backend the user did not explicitly request:
+         *  - WINENTSYNC=1: probe /dev/ntsync. If it opens, NTSync wins
+         *                  (client disables ESync). If it doesn't, fall
+         *                  through — caller will check WINEESYNC=1 for
+         *                  the ESync fallback.
+         *  - WINENTSYNC unset/0: skip the probe entirely.
+         *  - WINEFSYNC=1: server still consults do_fsync() for futex_waitv
+         *                 if NTSync isn't taking the slot. Independent flag.
+         *  - PROTON_NO_NTSYNC=1: legacy hard block on NTSync regardless of
+         *                       WINENTSYNC. Kept for upstream Proton parity.
+         * If neither WINENTSYNC nor WINEESYNC is set, the client uses
+         * server-side sync only. See do_esync() in dlls/ntdll/unix/esync.c. */
         const char *ntsync_env = getenv( "WINENTSYNC" );
-        int esync_forced      = esync_env  && atoi( esync_env  ) > 0;
-        int ntsync_opt_out    = ntsync_env && atoi( ntsync_env ) == 0;
+        int ntsync_requested  = ntsync_env && atoi( ntsync_env ) > 0;
         int ntsync_blocked    = getenv( "PROTON_NO_NTSYNC" ) && atoi( getenv( "PROTON_NO_NTSYNC" ) );
 
-        if (esync_forced || ntsync_opt_out || ntsync_blocked)
-            fd = -1;
-        else
+        if (ntsync_requested && !ntsync_blocked)
             fd = open( "/dev/ntsync", O_CLOEXEC | O_RDONLY );
+        else
+            fd = -1;
 
         if (fd >= 0)
         {
             do_fsync_cached = 0;
-            fprintf( stderr, "ntsync: up and running (auto-selected).\n" );
+            fprintf( stderr, "ntsync: up and running (WINENTSYNC=1).\n" );
         }
-        else if (esync_forced)
-            fprintf( stderr, "wineserver: WINEESYNC=1 forced — NTSync skipped, client uses ESync.\n" );
-        else if (ntsync_opt_out)
-            fprintf( stderr, "wineserver: WINENTSYNC=0 — NTSync disabled, client falls back to ESync.\n" );
-        else if (ntsync_blocked)
-            fprintf( stderr, "wineserver: NTSync blocked by PROTON_NO_NTSYNC — client falls back to ESync.\n" );
+        else if (ntsync_requested && ntsync_blocked)
+            fprintf( stderr, "wineserver: WINENTSYNC=1 but PROTON_NO_NTSYNC blocks it — checking ESync/FSync fallback.\n" );
+        else if (ntsync_requested)
+            fprintf( stderr, "wineserver: WINENTSYNC=1 but /dev/ntsync unavailable — checking ESync/FSync fallback.\n" );
         else if (do_fsync()) fd = FSYNC_USED_BY_SERVER;
-        else fprintf( stderr, "wineserver: /dev/ntsync unavailable (needs Linux 6.14+ kernel) — client falls back to ESync.\n" );
     }
     return fd;
 }

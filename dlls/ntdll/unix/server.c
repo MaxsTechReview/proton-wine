@@ -1600,7 +1600,20 @@ static int init_thread_pipe(void)
 void process_exit_wrapper( int status )
 {
     close( fd_socket );
-    exit( status );
+    /* By this point Wine has run its own teardown: PE-side DllMain
+     * PROCESS_DETACH for every loaded module, RtlProcessFlsData callbacks
+     * and frees, wineserver disconnect. What remains in exit() is libc's
+     * __cxa_finalize over every loaded shared object. On Bionic that path
+     * destroys numerous pthread_mutex_t objects in libc itself plus pulled-in
+     * system libs (libcrypto, libvulkan, libxml2, libgui, libbinder, libhwui,
+     * libandroid_runtime, libcamera_client, …). If any Wine thread is still
+     * mid-destructor when those go down the FORTIFY check on
+     * pthread_mutex_lock fires (Bionic stamps a destroyed-mutex sentinel)
+     * and aborts the process. Skip that minefield: _exit() goes straight
+     * to the kernel without running __cxa_finalize. Stdio buffers don't
+     * need flushing here -- Wine routes output via wineserver IPC, not
+     * libc stdio. */
+    _exit( status );
 }
 
 

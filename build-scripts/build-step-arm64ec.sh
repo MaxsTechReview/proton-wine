@@ -82,6 +82,11 @@ export CXXFLAGS="$C_OPTS $PERF_OPTS $LTO_OPTS $PAGE_SIZE_CFLAGS --sysroot=$TOOLC
 # LDFLAGS: pass -flto=thin so the driver runs the LTO codegen stage at
 # link time; -Wl,-plugin-opt=mcpu preserves the ARM extensions through
 # post-LTO codegen so the linker doesn't regress to generic armv8-a.
+# Bake a placeholder rpath so the linker emits a DT_RUNPATH section we can
+# rewrite after install with patchelf to a $ORIGIN-relative path. Trying to
+# pass a literal $ORIGIN through autoconf's LDFLAGS into make's recipes
+# loses to make's $-expansion ($O is a make variable reference); patchelf
+# avoids the escaping fight entirely. See --install step below.
 export LDFLAGS="-L$deps/lib -Wl,-rpath=$RUNTIME_PATH/lib $LTO_OPTS -Wl,-plugin-opt=mcpu=armv8-a+crypto+crc+lse -Wl,--gc-sections $PAGE_SIZE_LDFLAGS"
 
 export FREETYPE_CFLAGS="-I$deps/include/freetype2"
@@ -329,5 +334,23 @@ do
     cp -r $install_dir/bin/notepad $OUTPUT_DIR/bin
     cp -r $install_dir/lib/wine  $OUTPUT_DIR/lib
     cp -r $install_dir/share/wine  $OUTPUT_DIR/share
+
+    # Rewrite the baked-in absolute rpath with a $ORIGIN-relative one so
+    # the package finds <APP>/files/imagefs/usr/lib regardless of which
+    # container app installs it. Two entries cover both ELF host layouts:
+    #   bin/wineserver          → 4 ups to <APP>/files
+    #   lib/wine/<arch>-unix/.so → 6 ups to <APP>/files
+    if command -v patchelf >/dev/null 2>&1; then
+      RPATH_REL='$ORIGIN/../../../../imagefs/usr/lib:$ORIGIN/../../../../../../imagefs/usr/lib'
+      for f in "$OUTPUT_DIR/bin/wineserver" "$OUTPUT_DIR/bin/wine-preloader"; do
+        [ -f "$f" ] && patchelf --set-rpath "$RPATH_REL" "$f" 2>/dev/null
+      done
+      find "$OUTPUT_DIR/lib/wine" -type f -name '*.so' -exec patchelf --set-rpath "$RPATH_REL" {} \; 2>/dev/null
+      find "$OUTPUT_DIR/lib/wine" -type f -name 'wine' -exec patchelf --set-rpath "$RPATH_REL" {} \; 2>/dev/null
+      find "$OUTPUT_DIR/lib/wine" -type f -name 'wine-preloader' -exec patchelf --set-rpath "$RPATH_REL" {} \; 2>/dev/null
+      echo "patchelf: rewrote rpath to $RPATH_REL"
+    else
+      echo "patchelf not found; rpath stays baked-in (com.winnative.cmod path)"
+    fi
   fi
 done

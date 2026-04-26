@@ -21,7 +21,11 @@ for _arg in "$@"; do
   esac
 done
 if [ "$ENABLE_16KB_PAGES" = "1" ]; then
-  export TARGET=x86_64-linux-android34
+  # NDK r27d ships android35 for x86_64 too, matching the aarch64 path.
+  # Older notes had us pick android34 as a conservative bound; switch to
+  # android35 so both archs land on the same Bionic version and 16 KB
+  # alignment metadata.
+  export TARGET=x86_64-linux-android35
   PAGE_SIZE_CFLAGS="-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES"
   PAGE_SIZE_LDFLAGS="-Wl,-z,max-page-size=16384"
   echo "16 KB page-size support: enabled (target $TARGET)"
@@ -65,7 +69,14 @@ export CPPFLAGS="-I$deps/include --sysroot=$TOOLCHAIN/../sysroot"
 export C_OPTS="-march=x86-64 -mtune=generic -Wno-declaration-after-statement -Wno-implicit-function-declaration -Wno-int-conversion -ffunction-sections -fdata-sections"
 export CFLAGS="$C_OPTS $PAGE_SIZE_CFLAGS"
 export CXXFLAGS="$C_OPTS $PAGE_SIZE_CFLAGS"
-export LDFLAGS="-L$deps/lib -Wl,-rpath=$RUNTIME_PATH/lib -Wl,--gc-sections $PAGE_SIZE_LDFLAGS"
+# $ORIGIN-relative rpath so the package works in any container app
+# without baking in a per-app absolute path. Two entries cover both common
+# host-ELF layouts:
+#   - 4 ups for binaries in bin/ (wineserver)
+#   - 6 ups for .so files in lib/wine/<arch>-unix/ (ntdll.so, winex11.so, …)
+# Both resolve to <APP_DATA>/files/imagefs/usr/lib at runtime.
+RPATH_ORIGIN_RELATIVE='$ORIGIN/../../../../imagefs/usr/lib:$ORIGIN/../../../../../../imagefs/usr/lib'
+export LDFLAGS="-L$deps/lib -Wl,-rpath=$RPATH_ORIGIN_RELATIVE -Wl,--gc-sections $PAGE_SIZE_LDFLAGS"
 
 export FREETYPE_CFLAGS="-I$deps/include/freetype2"
 export PULSE_CFLAGS="-I$deps/include/pulse"

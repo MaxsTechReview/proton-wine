@@ -1507,12 +1507,23 @@ BOOL X11DRV_SetCursorPos( INT x, INT y )
         return FALSE;
     }
 
-#ifndef __ANDROID__
+#ifdef __ANDROID__
+    /* Skip XFixes on Android (extension is stubbed) but still iterate
+     * the X server sequence number with a no-op request, so the warp
+     * serial captured below stays consistent with what the server
+     * actually issues. Without this the bracketing requests are absent
+     * and warp_serial is off relative to the serials carried on
+     * incoming pointer events, which can misclassify events around a
+     * SetCursorPos. */
+    XNoOp( data->display );
+#else
     pXFixesHideCursor( data->display, root_window );
 #endif
     XWarpPointer( data->display, root_window, root_window, 0, 0, 0, 0, pos.x, pos.y );
     data->warp_serial = NextRequest( data->display );
-#ifndef __ANDROID__
+#ifdef __ANDROID__
+    XNoOp( data->display );
+#else
     pXFixesShowCursor( data->display, root_window );
 #endif
     XFlush( data->display ); /* avoids bad mouse lag in games that do their own mouse warping */
