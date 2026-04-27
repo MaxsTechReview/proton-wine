@@ -3531,9 +3531,14 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
                     {
                         memcpy( sec_addr, snapshot, size );
                         if (set_vprot( view, sec_addr, size, vprot ))
+                        {
+#ifdef HAVE___CLEAR_CACHE
+                            __clear_cache( sec_addr, sec_addr + size );
+#endif
                             ERR( "WINNATIVE_VPROT_FALLBACK: replaced %s section %.8s "
                                  "with anon RWX at %p (size %lx)\n",
                                  debugstr_us(nt_name), sec[i].Name, sec_addr, (unsigned long)size );
+                        }
                         else
                             ERR( "WINNATIVE_VPROT_FALLBACK: anon-RWX set_vprot still failed "
                                  "for %s section %.8s\n", debugstr_us(nt_name), sec[i].Name );
@@ -7499,19 +7504,32 @@ NTSTATUS WINAPI NtSetInformationVirtualMemory( HANDLE process,
 /**********************************************************************
  *           NtFlushInstructionCache  (NTDLL.@)
  */
+#if !defined(__x86_64__) && !defined(__i386__) && defined(HAVE___CLEAR_CACHE)
+static BOOL is_current_process_handle( HANDLE handle )
+{
+    PROCESS_BASIC_INFORMATION pbi;
+
+    if (handle == GetCurrentProcess()) return TRUE;
+    if (!handle) return FALSE;
+    if (NtQueryInformationProcess( handle, ProcessBasicInformation, &pbi, sizeof(pbi), NULL ))
+        return FALSE;
+
+    return HandleToULong( pbi.UniqueProcessId ) == GetCurrentProcessId();
+}
+#endif
+
 NTSTATUS WINAPI NtFlushInstructionCache( HANDLE handle, const void *addr, SIZE_T size )
 {
 #if defined(__x86_64__) || defined(__i386__)
     /* no-op */
 #elif defined(HAVE___CLEAR_CACHE)
-    if (handle == GetCurrentProcess())
+    if (is_current_process_handle( handle ))
     {
-        __clear_cache( (char *)addr, (char *)addr + size );
+        if (addr && size) __clear_cache( (char *)addr, (char *)addr + size );
     }
     else
     {
-        static int once;
-        if (!once++) FIXME( "%p %p %ld other process not supported\n", handle, addr, size );
+        TRACE( "%p %p %ld other process\n", handle, addr, size );
     }
 #else
     static int once;

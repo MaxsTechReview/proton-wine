@@ -69,6 +69,8 @@
 #include <sys/thr.h>
 #endif
 
+#define ARM64EC_MIN_USER_STACK_RESERVE (32 * 1024 * 1024)
+
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
 #include "winternl.h"
@@ -1262,6 +1264,10 @@ NTSTATUS init_thread_stack( TEB *teb, ULONG_PTR limit, SIZE_T reserve_size, SIZE
 #endif
 
     /* native stack */
+#ifdef __aarch64__
+    if (is_arm64ec() && reserve_size < ARM64EC_MIN_USER_STACK_RESERVE)
+        reserve_size = ARM64EC_MIN_USER_STACK_RESERVE;
+#endif
     if ((status = virtual_alloc_thread_stack( &stack, 0, limit, reserve_size, commit_size, TRUE )))
         return status;
     teb->Tib.StackBase = stack.StackBase;
@@ -2408,11 +2414,19 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
     {
         PROCESSOR_NUMBER *number = data;
 
-        FIXME( "ThreadIdealProcessorEx info class - stub\n" );
         if (length != sizeof(*number)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!number) return STATUS_ACCESS_VIOLATION;
         memset( number, 0, sizeof(*number) );
-        if (ret_len) *ret_len = sizeof(*number);
-        return STATUS_SUCCESS;
+        SERVER_START_REQ( get_thread_ideal_processor )
+        {
+            req->handle = wine_server_obj_handle( handle );
+            req->access = THREAD_QUERY_LIMITED_INFORMATION;
+            status = wine_server_call( req );
+            if (!status) number->Number = reply->ideal_processor;
+        }
+        SERVER_END_REQ;
+        if (!status && ret_len) *ret_len = sizeof(*number);
+        return status;
     }
 
     case ThreadIdealProcessor:
@@ -2636,9 +2650,39 @@ NTSTATUS WINAPI NtSetInformationThread( HANDLE handle, THREADINFOCLASS class,
         const ULONG *number = data;
 
         if (length != sizeof(*number)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!number) return STATUS_ACCESS_VIOLATION;
         if (*number > MAXIMUM_PROCESSORS) return STATUS_INVALID_PARAMETER;
-        FIXME( "ThreadIdealProcessor stub!\n" );
-        return STATUS_SUCCESS;
+        if (*number == MAXIMUM_PROCESSORS) return STATUS_SUCCESS;
+
+        SERVER_START_REQ( set_thread_info )
+        {
+            req->handle          = wine_server_obj_handle( handle );
+            req->ideal_processor = *number;
+            req->mask            = SET_THREAD_INFO_IDEAL_PROCESSOR;
+            status = wine_server_call( req );
+        }
+        SERVER_END_REQ;
+        return status;
+    }
+
+    case ThreadIdealProcessorEx:
+    {
+        const PROCESSOR_NUMBER *number = data;
+
+        if (length != sizeof(*number)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!number) return STATUS_ACCESS_VIOLATION;
+        if (number->Group || number->Reserved || number->Number >= MAXIMUM_PROCESSORS)
+            return STATUS_INVALID_PARAMETER;
+
+        SERVER_START_REQ( set_thread_info )
+        {
+            req->handle          = wine_server_obj_handle( handle );
+            req->ideal_processor = number->Number;
+            req->mask            = SET_THREAD_INFO_IDEAL_PROCESSOR;
+            status = wine_server_call( req );
+        }
+        SERVER_END_REQ;
+        return status;
     }
 
     case ThreadPriorityBoost:

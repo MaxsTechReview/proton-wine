@@ -86,6 +86,7 @@ struct thread
     client_ptr_t           teb;           /* TEB address (in client address space) */
     client_ptr_t           entry_point;   /* entry point (in client address space) */
     affinity_t             affinity;      /* affinity mask */
+    int                    ideal_processor; /* ideal processor hint */
     int                    priority;      /* current thread priority */
     int                    base_priority; /* base priority level (relative to process base priority class) */
     int                    disable_boost; /* disable thread priority boost */

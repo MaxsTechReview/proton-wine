@@ -571,10 +571,15 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetThreadGroupAffinity( HANDLE thread, const GROUP
  */
 DWORD WINAPI DECLSPEC_HOTPATCH SetThreadIdealProcessor( HANDLE thread, DWORD proc )
 {
+    PROCESSOR_NUMBER previous;
     NTSTATUS status;
+    DWORD old_proc = 0;
+
+    if (!NtQueryInformationThread( thread, ThreadIdealProcessorEx, &previous, sizeof(previous), NULL ))
+        old_proc = previous.Number;
 
     status = NtSetInformationThread( thread, ThreadIdealProcessor, &proc, sizeof(proc) );
-    if (NT_SUCCESS(status)) return status;
+    if (NT_SUCCESS(status)) return old_proc;
 
     SetLastError( RtlNtStatusToDosError( status ));
     return ~0u;
@@ -587,9 +592,34 @@ DWORD WINAPI DECLSPEC_HOTPATCH SetThreadIdealProcessor( HANDLE thread, DWORD pro
 BOOL WINAPI DECLSPEC_HOTPATCH SetThreadIdealProcessorEx( HANDLE thread, PROCESSOR_NUMBER *ideal,
                                                          PROCESSOR_NUMBER *previous )
 {
-    FIXME( "(%p %p %p): stub\n", thread, ideal, previous );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    PROCESSOR_NUMBER old;
+    NTSTATUS status;
+
+    if (!ideal)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    if (previous)
+    {
+        status = NtQueryInformationThread( thread, ThreadIdealProcessorEx, &old, sizeof(old), NULL );
+        if (!NT_SUCCESS(status))
+        {
+            SetLastError( RtlNtStatusToDosError( status ));
+            return FALSE;
+        }
+    }
+
+    status = NtSetInformationThread( thread, ThreadIdealProcessorEx, ideal, sizeof(*ideal) );
+    if (!NT_SUCCESS(status))
+    {
+        SetLastError( RtlNtStatusToDosError( status ));
+        return FALSE;
+    }
+
+    if (previous) *previous = old;
+    return TRUE;
 }
 
 

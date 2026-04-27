@@ -426,6 +426,7 @@ static inline void init_thread_structure( struct thread *thread )
     thread->exit_code       = 0;
     thread->esync_fd        = -1;
     thread->esync_apc_fd    = -1;
+    thread->ideal_processor = 0;
     thread->priority        = 0;
     thread->base_priority   = 0;
     thread->disable_boost   = 0;
@@ -816,6 +817,16 @@ struct thread *get_thread_from_pid( int pid )
     return NULL;
 }
 
+static unsigned int first_processor_from_affinity( affinity_t affinity )
+{
+    unsigned int i;
+
+    for (i = 0; i < 8 * sizeof(affinity); i++)
+        if (affinity & ((affinity_t)1 << i)) return i;
+
+    return 0;
+}
+
 int set_thread_affinity( struct thread *thread, affinity_t affinity )
 {
     int ret = 0;
@@ -844,7 +855,12 @@ int set_thread_affinity( struct thread *thread, affinity_t affinity )
         ret = sched_setaffinity( thread->unix_tid, sizeof(set), &set );
     }
 #endif
-    if (!ret) thread->affinity = affinity;
+    if (!ret)
+    {
+        thread->affinity = affinity;
+        if (!(affinity & ((affinity_t)1 << thread->ideal_processor)))
+            thread->ideal_processor = first_processor_from_affinity( affinity );
+    }
     return ret;
 }
 
@@ -949,6 +965,17 @@ void set_thread_disable_boost( struct thread *thread, int disable_boost )
     apply_thread_priority( thread );
 }
 
+static unsigned int set_thread_ideal_processor( struct thread *thread, int ideal_processor )
+{
+    if (ideal_processor < 0 || ideal_processor >= 8 * sizeof(thread->affinity))
+        return STATUS_INVALID_PARAMETER;
+    if (!(thread->affinity & ((affinity_t)1 << ideal_processor)))
+        return STATUS_INVALID_PARAMETER;
+
+    thread->ideal_processor = ideal_processor;
+    return STATUS_SUCCESS;
+}
+
 /* set all information about a thread */
 static void set_thread_info( struct thread *thread,
                              const struct set_thread_info_request *req )
@@ -980,6 +1007,11 @@ static void set_thread_info( struct thread *thread,
         thread->dbg_hidden = 1;
     if (req->mask & SET_THREAD_INFO_DISABLE_BOOST)
         set_thread_disable_boost( thread, req->disable_boost );
+    if (req->mask & SET_THREAD_INFO_IDEAL_PROCESSOR)
+    {
+        unsigned int status = set_thread_ideal_processor( thread, req->ideal_processor );
+        if (status) set_error( status );
+    }
     if (req->mask & SET_THREAD_INFO_DESCRIPTION)
     {
         WCHAR *desc;
@@ -1971,6 +2003,21 @@ DECL_HANDLER(get_thread_info)
                 set_error( STATUS_BUFFER_TOO_SMALL );
         }
 
+        release_object( thread );
+    }
+}
+
+/* fetch the ideal processor hint for a thread */
+DECL_HANDLER(get_thread_ideal_processor)
+{
+    struct thread *thread;
+    unsigned int access = req->access & (THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION);
+
+    if (!access) access = THREAD_QUERY_LIMITED_INFORMATION;
+    thread = get_thread_from_handle( req->handle, access );
+    if (thread)
+    {
+        reply->ideal_processor = thread->ideal_processor;
         release_object( thread );
     }
 }

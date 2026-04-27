@@ -1305,6 +1305,15 @@ struct cpu_topology_override
 #define GET_THREAD_INFO_FLAG_DISABLE_BOOST 0x08
 
 
+/* Retrieve a thread ideal processor hint */
+@REQ(get_thread_ideal_processor)
+    obj_handle_t handle;        /* thread handle */
+    unsigned int access;        /* required access rights */
+@REPLY
+    int          ideal_processor; /* ideal processor hint */
+@END
+
+
 /* Retrieve information about thread times */
 @REQ(get_thread_times)
     obj_handle_t handle;        /* thread handle */
@@ -1325,6 +1334,7 @@ struct cpu_topology_override
     client_ptr_t entry_point;  /* thread entry point */
     obj_handle_t token;        /* impersonation token */
     int          disable_boost;/* disable thread priority boost */
+    int          ideal_processor; /* ideal processor hint */
     unsigned int mask;         /* setting mask (see below) */
     VARARG(desc,unicode_str);  /* description string */
 @END
@@ -1336,6 +1346,7 @@ struct cpu_topology_override
 #define SET_THREAD_INFO_DESCRIPTION     0x20
 #define SET_THREAD_INFO_DBG_HIDDEN      0x40
 #define SET_THREAD_INFO_DISABLE_BOOST   0x80
+#define SET_THREAD_INFO_IDEAL_PROCESSOR 0x100
 
 
 /* Suspend a thread */

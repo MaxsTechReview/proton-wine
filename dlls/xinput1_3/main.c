@@ -48,6 +48,11 @@ DEFINE_GUID(GUID_DEVINTERFACE_WINEXINPUT,0x6c53d5fd,0x6480,0x440f,0xb6,0x18,0x47
 
 /* Not defined in the headers, used only by XInputGetStateEx */
 #define XINPUT_GAMEPAD_GUIDE 0x0400
+#define XINPUT_HID_CANCEL_TIMEOUT_MS 1000
+#define XINPUT_HID_START_TIMEOUT_MS 5000
+#define XINPUT_HID_UPDATE_THREAD_STACK_SIZE (32 * 1024 * 1024)
+#define XINPUT_HID_UPDATE_THREAD_FLAGS STACK_SIZE_PARAM_IS_A_RESERVATION
+#define XINPUT_CONTROLLER_LOCK_TIMEOUT_MS 1000
 
 WINE_DEFAULT_DEBUG_CHANNEL(xinput);
 
@@ -122,6 +127,23 @@ static HMODULE xinput_instance;
 static HANDLE start_event;
 static HANDLE update_event;
 static HANDLE steam_overlay_event;
+
+static BOOL controller_enter(struct xinput_controller *controller)
+{
+    DWORD start = GetTickCount();
+
+    while (!TryEnterCriticalSection(&controller->crit))
+    {
+        if (GetTickCount() - start >= XINPUT_CONTROLLER_LOCK_TIMEOUT_MS)
+        {
+            WARN("timed out locking controller %Iu\n", controller - controllers);
+            return FALSE;
+        }
+        Sleep(1);
+    }
+
+    return TRUE;
+}
 
 static void check_value_caps(struct xinput_controller *controller, USHORT usage, HIDP_VALUE_CAPS *caps)
 {
@@ -301,30 +323,52 @@ static DWORD HID_set_state(struct xinput_controller *controller, XINPUT_VIBRATIO
     return ERROR_SUCCESS;
 }
 
-static void controller_disable(struct xinput_controller *controller)
+static BOOL controller_disable(struct xinput_controller *controller)
 {
     XINPUT_VIBRATION state = {0};
+    DWORD wait;
 
-    if (!controller->enabled) return;
+    if (!controller->enabled) return TRUE;
     HID_set_state(controller, &state);
     controller->enabled = FALSE;
 
     CancelIoEx(controller->device, &controller->hid.read_ovl);
-    WaitForSingleObject(controller->hid.read_ovl.hEvent, INFINITE);
+    wait = WaitForSingleObject(controller->hid.read_ovl.hEvent, XINPUT_HID_CANCEL_TIMEOUT_MS);
+    if (wait == WAIT_TIMEOUT)
+    {
+        WARN("timed out waiting for controller %Iu read cancellation\n", controller - controllers);
+        SetEvent(update_event);
+        return FALSE;
+    }
+    else if (wait == WAIT_FAILED)
+    {
+        WARN("failed waiting for controller %Iu read cancellation, error %lu\n",
+             controller - controllers, GetLastError());
+        SetEvent(update_event);
+        return FALSE;
+    }
+
     SetEvent(update_event);
+    return TRUE;
 }
 
-static void controller_destroy(struct xinput_controller *controller, BOOL already_removed)
+static void controller_destroy_locked(struct xinput_controller *controller, BOOL already_removed)
 {
-    EnterCriticalSection(&controller->crit);
-
     if (controller->device)
     {
+        BOOL disabled = TRUE;
+
         TRACE("removing device %s from index %Iu\n", debugstr_w(controller->device_path), controller - controllers);
 
-        if (!already_removed) controller_disable(controller);
+        if (!already_removed) disabled = controller_disable(controller);
         CloseHandle(controller->device);
         controller->device = NULL;
+
+        if (!disabled)
+        {
+            WARN("leaking controller %Iu HID read resources after cancellation timeout\n", controller - controllers);
+            return;
+        }
 
         free(controller->hid.input_report_buf);
         free(controller->hid.output_report_buf);
@@ -332,6 +376,12 @@ static void controller_destroy(struct xinput_controller *controller, BOOL alread
         HidD_FreePreparsedData(controller->hid.preparsed);
         memset(&controller->hid, 0, sizeof(controller->hid));
     }
+}
+
+static void controller_destroy(struct xinput_controller *controller, BOOL already_removed)
+{
+    if (!controller_enter(controller)) return;
+    controller_destroy_locked(controller, already_removed);
 
     LeaveCriticalSection(&controller->crit);
 }
@@ -350,7 +400,7 @@ static void controller_enable(struct xinput_controller *controller)
     memset(&controller->hid.read_ovl, 0, sizeof(controller->hid.read_ovl));
     controller->hid.read_ovl.hEvent = controller->hid.read_event;
     ret = ReadFile(controller->device, report_buf, report_len, NULL, &controller->hid.read_ovl);
-    if (!ret && GetLastError() != ERROR_IO_PENDING) controller_destroy(controller, TRUE);
+    if (!ret && GetLastError() != ERROR_IO_PENDING) controller_destroy_locked(controller, TRUE);
     else SetEvent(update_event);
 }
 
@@ -376,7 +426,7 @@ static BOOL controller_init(struct xinput_controller *controller, PHIDP_PREPARSE
     lstrcpynW(controller->device_path, device_path, MAX_PATH);
     controller->enabled = FALSE;
 
-    EnterCriticalSection(&controller->crit);
+    if (!controller_enter(controller)) goto failed;
     controller->device = device;
     controller_enable(controller);
     LeaveCriticalSection(&controller->crit);
@@ -648,17 +698,19 @@ static void read_controller_state(struct xinput_controller *controller)
     if (status != HIDP_STATUS_SUCCESS) WARN("HidP_GetUsageValue HID_USAGE_PAGE_GENERIC / HID_USAGE_GENERIC_Z returned %#lx\n", status);
     else state.Gamepad.bLeftTrigger = scale_value(value, &controller->hid.lt_caps, 0, 255);
 
-    EnterCriticalSection(&controller->crit);
-    if (controller->enabled)
+    if (controller_enter(controller))
     {
-        state.dwPacketNumber = controller->state.dwPacketNumber + 1;
-        controller->state = state;
-        memset(&controller->hid.read_ovl, 0, sizeof(controller->hid.read_ovl));
-        controller->hid.read_ovl.hEvent = controller->hid.read_event;
-        ret = ReadFile(controller->device, report_buf, report_len, NULL, &controller->hid.read_ovl);
-        if (!ret && GetLastError() != ERROR_IO_PENDING) controller_destroy(controller, TRUE);
+        if (controller->enabled)
+        {
+            state.dwPacketNumber = controller->state.dwPacketNumber + 1;
+            controller->state = state;
+            memset(&controller->hid.read_ovl, 0, sizeof(controller->hid.read_ovl));
+            controller->hid.read_ovl.hEvent = controller->hid.read_event;
+            ret = ReadFile(controller->device, report_buf, report_len, NULL, &controller->hid.read_ovl);
+            if (!ret && GetLastError() != ERROR_IO_PENDING) controller_destroy_locked(controller, TRUE);
+        }
+        LeaveCriticalSection(&controller->crit);
     }
-    LeaveCriticalSection(&controller->crit);
 }
 
 static LRESULT CALLBACK xinput_devnotify_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
@@ -715,7 +767,7 @@ static DWORD WINAPI hid_update_thread_proc(void *param)
         for (i = 0; i < XUSER_MAX_COUNT; ++i)
         {
             if (!controllers[i].device) continue;
-            EnterCriticalSection(&controllers[i].crit);
+            if (!controller_enter(&controllers[i])) continue;
             if (controllers[i].enabled)
             {
                 devices[count] = controllers + i;
@@ -742,6 +794,7 @@ static BOOL WINAPI start_update_thread_once( INIT_ONCE *once, void *param, void 
 {
     HANDLE thread;
     HMODULE module;
+    DWORD wait;
 
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (void*)hid_update_thread_proc, &module))
         WARN("Failed to increase module's reference count, error: %lu\n", GetLastError());
@@ -754,11 +807,16 @@ static BOOL WINAPI start_update_thread_once( INIT_ONCE *once, void *param, void 
     update_event = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (!update_event) ERR("failed to create update event, error %lu\n", GetLastError());
 
-    thread = CreateThread(NULL, 0, hid_update_thread_proc, NULL, 0, NULL);
+    thread = CreateThread(NULL, XINPUT_HID_UPDATE_THREAD_STACK_SIZE, hid_update_thread_proc, NULL,
+                          XINPUT_HID_UPDATE_THREAD_FLAGS, NULL);
     if (!thread) ERR("failed to create update thread, error %lu\n", GetLastError());
-    CloseHandle(thread);
+    else CloseHandle(thread);
 
-    WaitForSingleObject(start_event, INFINITE);
+    wait = WaitForSingleObject(start_event, XINPUT_HID_START_TIMEOUT_MS);
+    if (wait == WAIT_TIMEOUT)
+        WARN("timed out waiting for the update thread to start\n");
+    else if (wait == WAIT_FAILED)
+        WARN("failed waiting for the update thread to start, error %lu\n", GetLastError());
     return TRUE;
 }
 
@@ -772,7 +830,7 @@ static BOOL controller_lock(struct xinput_controller *controller)
 {
     if (!controller->device) return FALSE;
 
-    EnterCriticalSection(&controller->crit);
+    if (!controller_enter(controller)) return FALSE;
 
     if (!controller->device)
     {

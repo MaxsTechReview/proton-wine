@@ -206,6 +206,14 @@ HRESULT WINAPI DwmGetWindowAttribute(HWND hwnd, DWORD attribute, PVOID pv_attrib
         hr = S_OK;
         break;
 
+    case DWMWA_CAPTION_BUTTON_BOUNDS:
+        if (size < sizeof(RECT))
+            return E_INVALIDARG;
+
+        SetRectEmpty((RECT *)pv_attribute);
+        hr = S_OK;
+        break;
+
     case DWMWA_EXTENDED_FRAME_BOUNDS:
     {
         RECT *rect = (RECT *)pv_attribute;

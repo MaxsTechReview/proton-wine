@@ -287,6 +287,17 @@ static void dump_get_thread_info_reply( const struct get_thread_info_reply *req 
     dump_varargs_unicode_str( ", desc=", cur_size );
 }
 
+static void dump_get_thread_ideal_processor_request( const struct get_thread_ideal_processor_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", access=%08x", req->access );
+}
+
+static void dump_get_thread_ideal_processor_reply( const struct get_thread_ideal_processor_reply *req )
+{
+    fprintf( stderr, " ideal_processor=%d", req->ideal_processor );
+}
+
 static void dump_get_thread_times_request( const struct get_thread_times_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -309,6 +320,7 @@ static void dump_set_thread_info_request( const struct set_thread_info_request *
     dump_uint64( ", entry_point=", &req->entry_point );
     fprintf( stderr, ", token=%04x", req->token );
     fprintf( stderr, ", disable_boost=%d", req->disable_boost );
+    fprintf( stderr, ", ideal_processor=%d", req->ideal_processor );
     fprintf( stderr, ", mask=%08x", req->mask );
     dump_varargs_unicode_str( ", desc=", cur_size );
 }
@@ -3638,6 +3650,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_process_vm_counters_request,
     (dump_func)dump_set_process_info_request,
     (dump_func)dump_get_thread_info_request,
+    (dump_func)dump_get_thread_ideal_processor_request,
     (dump_func)dump_get_thread_times_request,
     (dump_func)dump_set_thread_info_request,
     (dump_func)dump_suspend_thread_request,
@@ -3957,6 +3970,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_process_vm_counters_reply,
     NULL,
     (dump_func)dump_get_thread_info_reply,
+    (dump_func)dump_get_thread_ideal_processor_reply,
     (dump_func)dump_get_thread_times_reply,
     NULL,
     (dump_func)dump_suspend_thread_reply,
@@ -4276,6 +4290,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_process_vm_counters",
     "set_process_info",
     "get_thread_info",
+    "get_thread_ideal_processor",
     "get_thread_times",
     "set_thread_info",
     "suspend_thread",

@@ -22,6 +22,7 @@ DECL_HANDLER(get_process_image_name);
 DECL_HANDLER(get_process_vm_counters);
 DECL_HANDLER(set_process_info);
 DECL_HANDLER(get_thread_info);
+DECL_HANDLER(get_thread_ideal_processor);
 DECL_HANDLER(get_thread_times);
 DECL_HANDLER(set_thread_info);
 DECL_HANDLER(suspend_thread);
@@ -341,6 +342,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_process_vm_counters,
     (req_handler)req_set_process_info,
     (req_handler)req_get_thread_info,
+    (req_handler)req_get_thread_ideal_processor,
     (req_handler)req_get_thread_times,
     (req_handler)req_set_thread_info,
     (req_handler)req_suspend_thread,
@@ -823,6 +825,11 @@ C_ASSERT( offsetof(struct get_thread_info_reply, suspend_count) == 52 );
 C_ASSERT( offsetof(struct get_thread_info_reply, flags) == 56 );
 C_ASSERT( offsetof(struct get_thread_info_reply, desc_len) == 60 );
 C_ASSERT( sizeof(struct get_thread_info_reply) == 64 );
+C_ASSERT( offsetof(struct get_thread_ideal_processor_request, handle) == 12 );
+C_ASSERT( offsetof(struct get_thread_ideal_processor_request, access) == 16 );
+C_ASSERT( sizeof(struct get_thread_ideal_processor_request) == 24 );
+C_ASSERT( offsetof(struct get_thread_ideal_processor_reply, ideal_processor) == 8 );
+C_ASSERT( sizeof(struct get_thread_ideal_processor_reply) == 16 );
 C_ASSERT( offsetof(struct get_thread_times_request, handle) == 12 );
 C_ASSERT( sizeof(struct get_thread_times_request) == 16 );
 C_ASSERT( offsetof(struct get_thread_times_reply, creation_time) == 8 );
@@ -837,7 +844,8 @@ C_ASSERT( offsetof(struct set_thread_info_request, affinity) == 24 );
 C_ASSERT( offsetof(struct set_thread_info_request, entry_point) == 32 );
 C_ASSERT( offsetof(struct set_thread_info_request, token) == 40 );
 C_ASSERT( offsetof(struct set_thread_info_request, disable_boost) == 44 );
-C_ASSERT( offsetof(struct set_thread_info_request, mask) == 48 );
+C_ASSERT( offsetof(struct set_thread_info_request, ideal_processor) == 48 );
+C_ASSERT( offsetof(struct set_thread_info_request, mask) == 52 );
 C_ASSERT( sizeof(struct set_thread_info_request) == 56 );
 C_ASSERT( offsetof(struct suspend_thread_request, handle) == 12 );
 C_ASSERT( offsetof(struct suspend_thread_request, waited_handle) == 16 );
