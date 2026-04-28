@@ -2,7 +2,14 @@
 
 export TOOLCHAIN=$HOME/Android/android-ndk-r27d/toolchains/llvm/prebuilt/linux-x86_64/bin
 export TOOLCHAIN="$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin"
-export TARGET=aarch64-linux-android28
+
+# Honor parent build's API target / page-size flags so the resulting .so
+# matches the wine .so files in the package. Without this, an --enable-16kb-pages
+# build ends up with a 4KB-aligned sysvshm and the loader on Android 15+
+# 16KB-page kernels refuses to dlopen it.
+export TARGET="${SYSVSHM_TARGET:-aarch64-linux-android28}"
+SYSVSHM_CFLAGS="${SYSVSHM_CFLAGS:-}"
+SYSVSHM_LDFLAGS="${SYSVSHM_LDFLAGS:-}"
 
 export CC="$TOOLCHAIN/$TARGET-clang"
 export AR="$TOOLCHAIN/llvm-ar"
@@ -13,12 +20,13 @@ OUTPUT_DIR="$SCRIPT_DIR/build-aarch64"
 
 mkdir -p "$OUTPUT_DIR"
 
-echo "Building android_sysvshm for aarch64..."
+echo "Building android_sysvshm for aarch64 (target=$TARGET)..."
 
-$CC -Wall -std=gnu99 -shared -fPIC \
+$CC -Wall -std=gnu99 -shared -fPIC $SYSVSHM_CFLAGS \
     -I"$SCRIPT_DIR" \
     -o "$OUTPUT_DIR/libandroid-sysvshm.so" \
-    "$SCRIPT_DIR/android_sysvshm.c"
+    "$SCRIPT_DIR/android_sysvshm.c" \
+    $SYSVSHM_LDFLAGS
 
 if [ $? -eq 0 ]; then
     echo "Build successful! Output: $OUTPUT_DIR/libandroid-sysvshm.so"
