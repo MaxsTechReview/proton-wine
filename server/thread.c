@@ -1906,6 +1906,15 @@ DECL_HANDLER(init_first_thread)
     {
         reply->inproc_device = FSYNC_USED_BY_SERVER;
     }
+    else if (do_esync())
+    {
+        /* Hand the esync shm fd to the client at handshake time so it can
+         * mmap the same memfd-/shm_open-backed region without performing
+         * its own shm_open() — important on Android where shm_open is
+         * shimmed and benefits from skipping the lookup. */
+        reply->inproc_device = ESYNC_USED_BY_SERVER;
+        send_client_fd( process, esync_get_shm_fd(), reply->inproc_device );
+    }
     else if ((fd = get_inproc_device_fd()) >= 0)
     {
         reply->inproc_device = get_process_id( process ) | 1;

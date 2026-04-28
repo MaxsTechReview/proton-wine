@@ -6345,6 +6345,8 @@ struct get_esync_apc_fd_reply
 #define FSYNC_SHM_PAGE_SIZE 0x10000
 #define FSYNC_USED_BY_SERVER 0x7eadfeef
 
+#define ESYNC_USED_BY_SERVER 0x7eaddead
+
 enum fsync_type
 {
     FSYNC_SEMAPHORE = 1,

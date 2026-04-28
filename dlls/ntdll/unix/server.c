@@ -1724,6 +1724,13 @@ size_t server_init_process(void)
                 inproc_device_fd = FSYNC_USED_BY_SERVER;
                 fsync_init( pid );
             }
+            else if (reply->inproc_device == ESYNC_USED_BY_SERVER)
+            {
+                /* server-handed esync shm fd; consumed by esync_init() below. */
+                int shm_fd = wine_server_receive_fd( &handle );
+                assert( handle == ESYNC_USED_BY_SERVER );
+                esync_set_server_shm_fd( shm_fd );
+            }
             else if (reply->inproc_device)
             {
                 inproc_device_fd = wine_server_receive_fd( &handle );

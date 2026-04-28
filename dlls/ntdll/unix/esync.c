@@ -1457,6 +1457,18 @@ NTSTATUS esync_signal_and_wait( HANDLE signal, HANDLE wait, BOOLEAN alertable,
     return esync_wait_objects( 1, &wait, TRUE, alertable, timeout );
 }
 
+/* Optional fd handed to us by the wineserver via the ESYNC_USED_BY_SERVER
+ * branch of init_first_thread. When set, esync_init() uses it directly
+ * and skips shm_open() — avoids the named-shm filesystem dependency
+ * on Android (where shm_open is shimmed) and removes a race window
+ * where prefix init could lose the shm_open and exit(1). */
+static int server_shm_fd_override = -1;
+
+void esync_set_server_shm_fd( int fd )
+{
+    server_shm_fd_override = fd;
+}
+
 void esync_init(void)
 {
     struct stat st;
@@ -1473,6 +1485,17 @@ void esync_init(void)
         NTSTATUS ret = create_esync( 0, &handle, 0, NULL, 0, 0 );
         if (ret != STATUS_NOT_IMPLEMENTED)
             WARN("wineserver has WINEESYNC enabled but this process does not — proceeding without esync.\n");
+        return;
+    }
+
+    /* Server-handed fd path takes priority. The server already created
+     * and ftruncated the shm; we just adopt its fd and start mapping. */
+    if (server_shm_fd_override >= 0)
+    {
+        shm_fd = server_shm_fd_override;
+        pagesize = sysconf( _SC_PAGESIZE );
+        shm_addrs = calloc( 128, sizeof(shm_addrs[0]) );
+        shm_addrs_size = 128;
         return;
     }
 

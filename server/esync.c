@@ -115,6 +115,13 @@ void esync_init(void)
     atexit( shm_cleanup );
 }
 
+/* WinNative: expose the shm_fd so init_first_thread can hand it to clients
+ * via send_client_fd() as part of the ESYNC_USED_BY_SERVER reply path. */
+int esync_get_shm_fd(void)
+{
+    return shm_fd;
+}
+
 static struct list mutex_list = LIST_INIT(mutex_list);
 
 struct esync
@@ -253,6 +260,68 @@ struct event
 };
 C_ASSERT(sizeof(struct event) == 8);
 
+/* Allocate and initialize a shm slot for an eventfd-backed object. Factored
+ * out of create_esync() so server/inproc_sync.c can drive the same code
+ * for server-internal sync objects. The 'initval'/'max' params have
+ * type-specific meanings (see esync.h doc):
+ *   ESYNC_SEMAPHORE: initval=count, max=max
+ *   ESYNC_*_EVENT / ESYNC_*_SERVER: initval=signaled, max ignored
+ *   ESYNC_MUTEX: initval=owner_tid (0 if unowned), max=recursion count
+ */
+unsigned int esync_alloc_shm( int fd, enum esync_type type, int initval, int max )
+{
+    unsigned int shm_idx;
+
+    /* Use the fd as index. fd is unique within the server process and
+     * gets reused after close, so the slot can also be reused. */
+    shm_idx = fd + 1; /* keep index 0 reserved */
+
+    while (shm_idx * 8 >= shm_size)
+    {
+        shm_size += pagesize;
+        if (ftruncate( shm_fd, shm_size ) == -1)
+        {
+            fprintf( stderr, "esync: couldn't expand %s to size %ld: ",
+                     shm_name, (long)shm_size );
+            perror( "ftruncate" );
+        }
+    }
+
+    /* Initialize the shared memory portion server-side so a client that
+     * opens the object before the creator returns sees consistent state. */
+    switch (type)
+    {
+    case ESYNC_SEMAPHORE:
+    {
+        struct semaphore *semaphore = get_shm( shm_idx );
+        semaphore->max = max;
+        semaphore->count = initval;
+        break;
+    }
+    case ESYNC_AUTO_EVENT:
+    case ESYNC_MANUAL_EVENT:
+    case ESYNC_AUTO_SERVER:
+    case ESYNC_MANUAL_SERVER:
+    {
+        struct event *event = get_shm( shm_idx );
+        event->signaled = initval ? 1 : 0;
+        event->locked = 0;
+        break;
+    }
+    case ESYNC_MUTEX:
+    {
+        struct mutex *mutex = get_shm( shm_idx );
+        mutex->tid = initval;     /* owner_tid */
+        mutex->count = max;       /* recursion count */
+        break;
+    }
+    default:
+        break;
+    }
+
+    return shm_idx;
+}
+
 struct esync *create_esync( struct object *root, const struct unicode_str *name,
                             unsigned int attr, int initval, int max, enum esync_type type,
                             const struct security_descriptor *sd )
@@ -280,52 +349,21 @@ struct esync *create_esync( struct object *root, const struct unicode_str *name,
             }
             esync->type = type;
 
-            /* Use the fd as index, since that'll be unique across all
-             * processes, but should hopefully end up also allowing reuse. */
-            esync->shm_idx = esync->fd + 1; /* we keep index 0 reserved */
-            while (esync->shm_idx * 8 >= shm_size)
+            /* Allocate the shm slot. For mutexes the alloc helper takes
+             * (owner_tid, count); create_esync's user-visible mutex is
+             * created either un-owned (initval=1: tid=0,count=0) or held
+             * by the creator (initval=0: tid=current->id,count=1). Mirror
+             * that here, then keep mutex_entry list bookkeeping local. */
+            if (type == ESYNC_MUTEX)
             {
-                /* Better expand the shm section. */
-                shm_size += pagesize;
-                if (ftruncate( shm_fd, shm_size ) == -1)
-                {
-                    fprintf( stderr, "esync: couldn't expand %s to size %ld: ",
-                             shm_name, (long)shm_size );
-                    perror( "ftruncate" );
-                }
-            }
-
-            /* Initialize the shared memory portion. We want to do this on the
-             * server side to avoid a potential though unlikely race whereby
-             * the same object is opened and used between the time it's created
-             * and the time its shared memory portion is initialized. */
-            switch (type)
-            {
-            case ESYNC_SEMAPHORE:
-            {
-                struct semaphore *semaphore = get_shm( esync->shm_idx );
-                semaphore->max = max;
-                semaphore->count = initval;
-                break;
-            }
-            case ESYNC_AUTO_EVENT:
-            case ESYNC_MANUAL_EVENT:
-            {
-                struct event *event = get_shm( esync->shm_idx );
-                event->signaled = initval ? 1 : 0;
-                event->locked = 0;
-                break;
-            }
-            case ESYNC_MUTEX:
-            {
-                struct mutex *mutex = get_shm( esync->shm_idx );
-                mutex->tid = initval ? 0 : current->id;
-                mutex->count = initval ? 0 : 1;
+                esync->shm_idx = esync_alloc_shm( esync->fd, ESYNC_MUTEX,
+                                                  initval ? 0 : current->id,
+                                                  initval ? 0 : 1 );
                 list_add_tail( &mutex_list, &esync->mutex_entry );
-                break;
             }
-            default:
-                assert( 0 );
+            else
+            {
+                esync->shm_idx = esync_alloc_shm( esync->fd, type, initval, max );
             }
         }
         else
@@ -404,6 +442,8 @@ void esync_clear( int fd )
     read( fd, &value, sizeof(value) );
 }
 
+#ifndef __linux__
+/* Only referenced by the non-Linux fallback in event_lock(). */
 static inline void small_pause(void)
 {
 #ifdef __i386__
@@ -412,6 +452,7 @@ static inline void small_pause(void)
     __asm__ __volatile__( "" : : : "memory" );
 #endif
 }
+#endif
 
 /* Cross-process futex lock for the manual-reset event 'locked' word in shm.
  * Mirrors the client-side helper in dlls/ntdll/unix/esync.c — both sides MUST
@@ -446,54 +487,67 @@ static inline void event_unlock( struct event *event )
 #endif
 }
 
-/* Server-side event support. */
-void esync_set_event( struct esync *esync )
+/* Primitive-arg core of esync_set_event so server/inproc_sync.c can call
+ * the same logic without owning a struct esync. The struct-esync wrapper
+ * below just forwards. */
+void esync_inproc_set_event( int fd, unsigned int shm_idx, enum esync_type type )
 {
     static const uint64_t value = 1;
-    struct event *event = get_shm( esync->shm_idx );
+    struct event *event = get_shm( shm_idx );
 
-    assert( esync->obj.ops == &esync_ops );
     assert( event != NULL );
 
     if (debug_level)
-        fprintf( stderr, "esync_set_event() fd=%d\n", esync->fd );
+        fprintf( stderr, "esync_inproc_set_event() fd=%d\n", fd );
 
-    if (esync->type == ESYNC_MANUAL_EVENT)
+    if (type == ESYNC_MANUAL_EVENT || type == ESYNC_MANUAL_SERVER)
         event_lock( event );
 
     if (!__atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST ))
     {
-        if (write( esync->fd, &value, sizeof(value) ) == -1)
+        if (write( fd, &value, sizeof(value) ) == -1)
             perror( "esync: write" );
     }
 
-    if (esync->type == ESYNC_MANUAL_EVENT)
+    if (type == ESYNC_MANUAL_EVENT || type == ESYNC_MANUAL_SERVER)
         event_unlock( event );
 }
 
-void esync_reset_event( struct esync *esync )
+/* Server-side event support. */
+void esync_set_event( struct esync *esync )
+{
+    assert( esync->obj.ops == &esync_ops );
+    esync_inproc_set_event( esync->fd, esync->shm_idx, esync->type );
+}
+
+void esync_inproc_reset_event( int fd, unsigned int shm_idx, enum esync_type type )
 {
     static uint64_t value = 1;
-    struct event *event = get_shm( esync->shm_idx );
+    struct event *event = get_shm( shm_idx );
 
-    assert( esync->obj.ops == &esync_ops );
     assert( event != NULL );
 
     if (debug_level)
-        fprintf( stderr, "esync_reset_event() fd=%d\n", esync->fd );
+        fprintf( stderr, "esync_inproc_reset_event() fd=%d\n", fd );
 
-    if (esync->type == ESYNC_MANUAL_EVENT)
+    if (type == ESYNC_MANUAL_EVENT || type == ESYNC_MANUAL_SERVER)
         event_lock( event );
 
     /* Only bother signaling the fd if we weren't already signaled. */
     if (__atomic_exchange_n( &event->signaled, 0, __ATOMIC_SEQ_CST ))
     {
         /* we don't care about the return value */
-        read( esync->fd, &value, sizeof(value) );
+        read( fd, &value, sizeof(value) );
     }
 
-    if (esync->type == ESYNC_MANUAL_EVENT)
+    if (type == ESYNC_MANUAL_EVENT || type == ESYNC_MANUAL_SERVER)
         event_unlock( event );
+}
+
+void esync_reset_event( struct esync *esync )
+{
+    assert( esync->obj.ops == &esync_ops );
+    esync_inproc_reset_event( esync->fd, esync->shm_idx, esync->type );
 }
 
 void esync_abandon_mutexes( struct thread *thread )

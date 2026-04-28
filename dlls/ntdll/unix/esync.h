@@ -20,6 +20,11 @@
 
 extern int do_esync(void);
 extern void esync_init(void);
+/* Optional: hand the wineserver-allocated esync shm fd to the client init
+ * code so esync_init() can adopt it and skip shm_open(). Wired through the
+ * ESYNC_USED_BY_SERVER reply path of init_first_thread. Pass -1 (default)
+ * to take the legacy shm_open() path. Must be called before esync_init(). */
+extern void esync_set_server_shm_fd( int fd );
 extern NTSTATUS esync_close( HANDLE handle );
 
 extern NTSTATUS esync_create_semaphore(HANDLE *handle, ACCESS_MASK access,

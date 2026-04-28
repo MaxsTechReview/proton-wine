@@ -27,6 +27,23 @@ void esync_wake_fd( int fd );
 void esync_wake_up( struct object *obj );
 void esync_clear( int fd );
 
+/* WinNative: expose the eventfd-shm bootstrap for the ESYNC_USED_BY_SERVER
+ * protocol path. esync_get_shm_fd() returns the fd that
+ * dlls/ntdll/unix/server.c hands to the client at init_first_thread time so
+ * the client can mmap the same memfd-backed region without going through
+ * shm_open()/shm_utils. esync_alloc_shm() factors out the per-object shm
+ * slot allocation that was inline in create_esync() so server-side
+ * inproc-sync internal objects can reuse it. */
+int esync_get_shm_fd(void);
+unsigned int esync_alloc_shm( int fd, enum esync_type type, int initval, int max );
+
+/* WinNative: primitive-arg variants of esync_set_event/esync_reset_event so
+ * server/inproc_sync.c can drive eventfd-backed sync without owning a
+ * struct esync. The full struct esync versions below stay for the existing
+ * named-object path. */
+void esync_inproc_set_event( int fd, unsigned int shm_idx, enum esync_type type );
+void esync_inproc_reset_event( int fd, unsigned int shm_idx, enum esync_type type );
+
 struct esync;
 
 extern const struct object_ops esync_ops;
