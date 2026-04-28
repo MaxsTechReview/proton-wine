@@ -280,7 +280,14 @@ static NTSTATUS get_object( HANDLE handle, struct esync **obj )
         return STATUS_INVALID_HANDLE;
     }
 
-    /* We need to try grabbing it from the server. */
+    /* We need to try grabbing it from the server. The fd_cache_mutex is
+     * held continuously across the server call and the install in
+     * esync_list / inproc-sync cache so a concurrent NtClose() on this
+     * handle (which serializes through the same mutex) cannot land
+     * between us receiving the fd and registering it for refcount
+     * protection. Without this extension, a close that beat add_to_list
+     * found an empty cache slot, no-op'd, and the fd would then be
+     * installed under a defunct handle and leak forever. */
     server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
     if (!(*obj = get_cached_object( handle )))
     {
@@ -296,14 +303,16 @@ static NTSTATUS get_object( HANDLE handle, struct esync **obj )
             }
         }
         SERVER_END_REQ;
+
+        if (!ret)
+        {
+            TRACE("Got fd %d for handle %p.\n", fd, handle);
+            *obj = add_to_list( handle, type, fd, shm_idx ? get_shm( shm_idx ) : 0 );
+        }
     }
     server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
 
-    if (*obj)
-    {
-        /* We managed to grab it while in the CS; return it. */
-        return STATUS_SUCCESS;
-    }
+    if (*obj) return STATUS_SUCCESS;
 
     if (ret)
     {
@@ -312,9 +321,6 @@ static NTSTATUS get_object( HANDLE handle, struct esync **obj )
         return ret;
     }
 
-    TRACE("Got fd %d for handle %p.\n", fd, handle);
-
-    *obj = add_to_list( handle, type, fd, shm_idx ? get_shm( shm_idx ) : 0 );
     return ret;
 }
 

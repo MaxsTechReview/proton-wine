@@ -28,10 +28,13 @@ extern struct inproc_sync *get_cached_inproc_sync( HANDLE handle );
 extern void release_inproc_sync( struct inproc_sync *sync );
 
 /* Register an esync fd into the inproc-sync refcount cache so its
- * lifetime is tied to outstanding waiter references. After this call
- * the cache holds exactly one reference for the handle; close goes
- * through close_inproc_sync()'s do_esync() branch. Idempotent: calling
- * twice for the same live handle leaves the cache state unchanged. */
+ * lifetime is tied to outstanding waiter references. Caller MUST hold
+ * fd_cache_mutex — this serializes registration against close_handle
+ * and prevents a leaked fd if a close races with the install. After
+ * the call the cache holds exactly one reference for the handle;
+ * close goes through close_inproc_sync()'s do_esync() branch.
+ * Idempotent: calling twice for the same live handle leaves the cache
+ * state unchanged. */
 extern void esync_register_inproc( HANDLE handle, int fd );
 
 #endif /* __WINE_NTDLL_UNIX_SYNC_H */

@@ -641,16 +641,16 @@ void release_inproc_sync( struct inproc_sync *sync )
     if (!ref) close( fd );
 }
 
-/* Register an esync eventfd into the refcount cache. Takes fd_cache_mutex
- * internally — esync's add_to_list() runs outside the mutex that wraps
- * the get_esync_fd server call. After the call the cache holds exactly
- * one reference; close_inproc_sync()'s do_esync() branch will drop both
- * the temporary lookup ref and that owning ref so the fd closes once no
- * waiters are left. */
+/* Register an esync eventfd into the refcount cache. Caller MUST hold
+ * fd_cache_mutex — get_object() in esync.c holds it across the server
+ * call and add_to_list() so that a concurrent close on the same handle
+ * cannot land between fd receipt and registration. After the call the
+ * cache holds exactly one reference; close_inproc_sync()'s do_esync()
+ * branch will drop both the temporary lookup ref and that owning ref so
+ * the fd closes once no waiters are left. */
 void esync_register_inproc( HANDLE handle, int fd )
 {
     struct inproc_sync stack, *result;
-    sigset_t sigset;
 
     stack.refcount = 1;
     stack.fd       = fd;
@@ -658,9 +658,7 @@ void esync_register_inproc( HANDLE handle, int fd )
     stack.type     = INPROC_SYNC_UNKNOWN; /* type is held in esync_list */
     stack.closed   = 0;
 
-    server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
     result = cache_inproc_sync( handle, &stack );
-    server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
 
     /* cache_inproc_sync stores refcount=2 (one for the cache, one for the
      * caller); we want the cache to hold the only reference, so drop the
