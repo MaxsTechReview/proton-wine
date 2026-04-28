@@ -33,6 +33,10 @@
 # include <sys/stat.h>
 #endif
 #include <unistd.h>
+#ifdef __linux__
+# include <sys/syscall.h>
+# include <linux/futex.h>
+#endif
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -409,6 +413,39 @@ static inline void small_pause(void)
 #endif
 }
 
+/* Cross-process futex lock for the manual-reset event 'locked' word in shm.
+ * Mirrors the client-side helper in dlls/ntdll/unix/esync.c — both sides MUST
+ * use the same protocol or waiters will never be woken. */
+static inline void event_lock( struct event *event )
+{
+#ifdef __linux__
+    int c;
+    if ((c = __sync_val_compare_and_swap( &event->locked, 0, 1 )) != 0)
+    {
+        if (c != 2)
+            c = __atomic_exchange_n( &event->locked, 2, __ATOMIC_SEQ_CST );
+        while (c != 0)
+        {
+            syscall( __NR_futex, &event->locked, FUTEX_WAIT, 2, NULL, NULL, 0 );
+            c = __atomic_exchange_n( &event->locked, 2, __ATOMIC_SEQ_CST );
+        }
+    }
+#else
+    while (__sync_val_compare_and_swap( &event->locked, 0, 1 ))
+        small_pause();
+#endif
+}
+
+static inline void event_unlock( struct event *event )
+{
+#ifdef __linux__
+    if (__atomic_exchange_n( &event->locked, 0, __ATOMIC_SEQ_CST ) == 2)
+        syscall( __NR_futex, &event->locked, FUTEX_WAKE, 1, NULL, NULL, 0 );
+#else
+    event->locked = 0;
+#endif
+}
+
 /* Server-side event support. */
 void esync_set_event( struct esync *esync )
 {
@@ -422,11 +459,7 @@ void esync_set_event( struct esync *esync )
         fprintf( stderr, "esync_set_event() fd=%d\n", esync->fd );
 
     if (esync->type == ESYNC_MANUAL_EVENT)
-    {
-        /* Acquire the spinlock. */
-        while (__sync_val_compare_and_swap( &event->locked, 0, 1 ))
-            small_pause();
-    }
+        event_lock( event );
 
     if (!__atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST ))
     {
@@ -435,10 +468,7 @@ void esync_set_event( struct esync *esync )
     }
 
     if (esync->type == ESYNC_MANUAL_EVENT)
-    {
-        /* Release the spinlock. */
-        event->locked = 0;
-    }
+        event_unlock( event );
 }
 
 void esync_reset_event( struct esync *esync )
@@ -453,11 +483,7 @@ void esync_reset_event( struct esync *esync )
         fprintf( stderr, "esync_reset_event() fd=%d\n", esync->fd );
 
     if (esync->type == ESYNC_MANUAL_EVENT)
-    {
-        /* Acquire the spinlock. */
-        while (__sync_val_compare_and_swap( &event->locked, 0, 1 ))
-            small_pause();
-    }
+        event_lock( event );
 
     /* Only bother signaling the fd if we weren't already signaled. */
     if (__atomic_exchange_n( &event->signaled, 0, __ATOMIC_SEQ_CST ))
@@ -467,10 +493,7 @@ void esync_reset_event( struct esync *esync )
     }
 
     if (esync->type == ESYNC_MANUAL_EVENT)
-    {
-        /* Release the spinlock. */
-        event->locked = 0;
-    }
+        event_unlock( event );
 }
 
 void esync_abandon_mutexes( struct thread *thread )

@@ -38,6 +38,10 @@
 #include <poll.h>
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef __linux__
+# include <sys/syscall.h>
+# include <linux/futex.h>
+#endif
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -508,6 +512,44 @@ static inline void small_pause(void)
 #endif
 }
 
+/* Manual-reset event lock. The shm is shared across processes, so the futex
+ * must be cross-process (no FUTEX_*_PRIVATE). State machine:
+ *   0 = unlocked
+ *   1 = locked, no waiters
+ *   2 = locked, one or more waiters
+ * Drepper-style three-state lock: contended unlock issues FUTEX_WAKE.
+ * On non-Linux fall back to the historical spinlock so the file still
+ * compiles on FreeBSD/macOS hosts that build the unix-side library. */
+static inline void event_lock( struct event *event )
+{
+#ifdef __linux__
+    int c;
+    if ((c = __sync_val_compare_and_swap( &event->locked, 0, 1 )) != 0)
+    {
+        if (c != 2)
+            c = __atomic_exchange_n( &event->locked, 2, __ATOMIC_SEQ_CST );
+        while (c != 0)
+        {
+            syscall( __NR_futex, &event->locked, FUTEX_WAIT, 2, NULL, NULL, 0 );
+            c = __atomic_exchange_n( &event->locked, 2, __ATOMIC_SEQ_CST );
+        }
+    }
+#else
+    while (InterlockedCompareExchange( (LONG *)&event->locked, 1, 0 ))
+        small_pause();
+#endif
+}
+
+static inline void event_unlock( struct event *event )
+{
+#ifdef __linux__
+    if (__atomic_exchange_n( &event->locked, 0, __ATOMIC_SEQ_CST ) == 2)
+        syscall( __NR_futex, &event->locked, FUTEX_WAKE, 1, NULL, NULL, 0 );
+#else
+    event->locked = 0;
+#endif
+}
+
 /* Manual-reset events are actually racier than other objects in terms of shm
  * state. With other objects, races don't matter, because we only treat the shm
  * state as a hint that lets us skip poll()—we still have to read(). But with
@@ -573,11 +615,7 @@ NTSTATUS esync_set_event( HANDLE handle )
         return STATUS_OBJECT_TYPE_MISMATCH;
 
     if (obj->type == ESYNC_MANUAL_EVENT)
-    {
-        /* Acquire the spinlock. */
-        while (InterlockedCompareExchange( (LONG *)&event->locked, 1, 0 ))
-            small_pause();
-    }
+        event_lock( event );
 
     /* For manual-reset events, as long as we're in a lock, we can take the
      * optimization of only calling write() if the event wasn't already
@@ -595,10 +633,7 @@ NTSTATUS esync_set_event( HANDLE handle )
     }
 
     if (obj->type == ESYNC_MANUAL_EVENT)
-    {
-        /* Release the spinlock. */
-        event->locked = 0;
-    }
+        event_unlock( event );
 
     return STATUS_SUCCESS;
 }
@@ -619,11 +654,7 @@ NTSTATUS esync_reset_event( HANDLE handle )
         return STATUS_OBJECT_TYPE_MISMATCH;
 
     if (obj->type == ESYNC_MANUAL_EVENT)
-    {
-        /* Acquire the spinlock. */
-        while (InterlockedCompareExchange( (LONG *)&event->locked, 1, 0 ))
-            small_pause();
-    }
+        event_lock( event );
 
     /* For manual-reset events, as long as we're in a lock, we can take the
      * optimization of only calling read() if the event was already signaled.
@@ -640,10 +671,7 @@ NTSTATUS esync_reset_event( HANDLE handle )
     }
 
     if (obj->type == ESYNC_MANUAL_EVENT)
-    {
-        /* Release the spinlock. */
-        event->locked = 0;
-    }
+        event_unlock( event );
 
     return STATUS_SUCCESS;
 }
