@@ -52,6 +52,7 @@
 
 #include "unix_private.h"
 #include "esync.h"
+#include "sync.h"
 #include "fsync.h"
 #ifdef __ANDROID__
 #include "../../../android/shm_utils/shm_utils.h"
@@ -231,6 +232,12 @@ static struct esync *add_to_list( HANDLE handle, enum esync_type type, int fd, v
     {
         esync_list[entry][idx].fd = fd;
         esync_list[entry][idx].shm = shm;
+        /* Hand the fd's lifetime to the inproc-sync refcount cache so a
+         * close racing against an in-flight wait can't yank the fd out
+         * from under poll(). The cache owns exactly one reference until
+         * close_inproc_sync() runs; waiters bump it for the duration of
+         * their poll loop via get_cached_inproc_sync(). */
+        esync_register_inproc( handle, fd );
     }
     return &esync_list[entry][idx];
 }
@@ -321,7 +328,12 @@ NTSTATUS esync_close( HANDLE handle )
     {
         if (InterlockedExchange((LONG *)&esync_list[entry][idx].type, 0))
         {
-            close( esync_list[entry][idx].fd );
+            /* Fd lifetime is owned by the inproc-sync refcount cache; the
+             * companion close_inproc_sync() call (run by the same
+             * NtClose() path under fd_cache_mutex) drops the cache's
+             * owning reference so the fd closes once any in-flight
+             * waiters release theirs. Don't close() here or we'd race
+             * with a poll() in another thread. */
             return STATUS_SUCCESS;
         }
     }
@@ -503,6 +515,8 @@ NTSTATUS esync_open_event( HANDLE *handle, ACCESS_MASK access,
     return open_esync( ESYNC_AUTO_EVENT, handle, access, attr ); /* doesn't matter which */
 }
 
+#ifndef __linux__
+/* Only referenced by the non-Linux fallback in event_lock(). */
 static inline void small_pause(void)
 {
 #ifdef __i386__
@@ -511,6 +525,7 @@ static inline void small_pause(void)
     __asm__ __volatile__( "" : : : "memory" );
 #endif
 }
+#endif
 
 /* Manual-reset event lock. The shm is shared across processes, so the futex
  * must be cross-process (no FUTEX_*_PRIVATE). State machine:
@@ -1359,13 +1374,37 @@ static void server_set_msgwait( int in_msgwait )
 /* This is a very thin wrapper around the proper implementation above. The
  * purpose is to make sure the server knows when we are doing a message wait.
  * This is separated into a wrapper function since there are at least a dozen
- * exit paths from esync_wait_objects(). */
+ * exit paths from esync_wait_objects().
+ *
+ * It also bracket-takes a reference on each handle's inproc-sync cache entry
+ * so that a CloseHandle() on another thread cannot free the underlying fd
+ * while __esync_wait_objects() is parked in poll(). Without this, a close
+ * mid-poll closes the fd, the kernel may immediately reuse that fd number,
+ * and the poll() ends up watching an unrelated object. */
 NTSTATUS esync_wait_objects( DWORD count, const HANDLE *handles, BOOLEAN wait_any,
                              BOOLEAN alertable, const LARGE_INTEGER *timeout )
 {
     BOOL msgwait = FALSE;
     struct esync *obj;
     NTSTATUS ret;
+    struct inproc_sync *cache_refs[MAXIMUM_WAIT_OBJECTS] = { NULL };
+    DWORD i;
+
+    /* Force registration in the inproc-sync cache for every handle that
+     * isn't already there; get_object()'s add_to_list() path calls
+     * esync_register_inproc() on first insertion. */
+    for (i = 0; i < count && i < MAXIMUM_WAIT_OBJECTS; i++)
+    {
+        struct esync *o;
+        get_object( handles[i], &o );
+    }
+
+    /* Take a reference on each cached fd. NULL is fine — it just means
+     * the handle was never registered (server-only object) or it has
+     * already been closed and the fd is gone; the wait code below will
+     * surface the error through its existing paths. */
+    for (i = 0; i < count && i < MAXIMUM_WAIT_OBJECTS; i++)
+        cache_refs[i] = get_cached_inproc_sync( handles[i] );
 
     if (count && !get_object( handles[count - 1], &obj ) && obj->type == ESYNC_QUEUE)
     {
@@ -1377,6 +1416,9 @@ NTSTATUS esync_wait_objects( DWORD count, const HANDLE *handles, BOOLEAN wait_an
 
     if (msgwait)
         server_set_msgwait( 0 );
+
+    for (i = 0; i < count && i < MAXIMUM_WAIT_OBJECTS; i++)
+        if (cache_refs[i]) release_inproc_sync( cache_refs[i] );
 
     return ret;
 }

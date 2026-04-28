@@ -74,6 +74,7 @@
 
 #include "fsync.h"
 #include "esync.h"
+#include "sync.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(sync);
 
@@ -629,7 +630,7 @@ static inline LONG interlocked_inc_if_nonzero( LONG *dest )
     return val;
 }
 
-static void release_inproc_sync( struct inproc_sync *sync )
+void release_inproc_sync( struct inproc_sync *sync )
 {
     /* save the fd now; as soon as the refcount hits 0 we cannot
      * access the cache anymore */
@@ -640,7 +641,36 @@ static void release_inproc_sync( struct inproc_sync *sync )
     if (!ref) close( fd );
 }
 
-static struct inproc_sync *get_cached_inproc_sync( HANDLE handle )
+/* Register an esync eventfd into the refcount cache. Takes fd_cache_mutex
+ * internally — esync's add_to_list() runs outside the mutex that wraps
+ * the get_esync_fd server call. After the call the cache holds exactly
+ * one reference; close_inproc_sync()'s do_esync() branch will drop both
+ * the temporary lookup ref and that owning ref so the fd closes once no
+ * waiters are left. */
+void esync_register_inproc( HANDLE handle, int fd )
+{
+    struct inproc_sync stack, *result;
+    sigset_t sigset;
+
+    stack.refcount = 1;
+    stack.fd       = fd;
+    stack.access   = ~0u;                 /* esync does its own access checks */
+    stack.type     = INPROC_SYNC_UNKNOWN; /* type is held in esync_list */
+    stack.closed   = 0;
+
+    server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
+    result = cache_inproc_sync( handle, &stack );
+    server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
+
+    /* cache_inproc_sync stores refcount=2 (one for the cache, one for the
+     * caller); we want the cache to hold the only reference, so drop the
+     * caller's. If cache_inproc_sync declined to cache (slot already in use),
+     * `result == &stack` and there is nothing to release. */
+    if (result && result != &stack)
+        release_inproc_sync( result );
+}
+
+struct inproc_sync *get_cached_inproc_sync( HANDLE handle )
 {
     unsigned int entry, idx = inproc_sync_handle_to_index( handle, &entry );
     struct inproc_sync *cache;
@@ -769,6 +799,20 @@ void close_inproc_sync( HANDLE handle )
     if (do_fsync())
     {
         fsync_close( handle );
+        return;
+    }
+    if (do_esync())
+    {
+        /* esync routes its eventfds through this cache for refcount-protected
+         * close-while-waiting; we mark the slot closed and drop both the
+         * temporary lookup ref and the cache's owning ref, deferring the
+         * actual close() until any in-flight waiters release their refs. */
+        if ((cache = get_cached_inproc_sync( handle )))
+        {
+            cache->closed = 1;
+            release_inproc_sync( cache );
+            release_inproc_sync( cache );
+        }
         return;
     }
     if (inproc_device_fd < 0) return;
