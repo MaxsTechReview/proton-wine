@@ -79,6 +79,9 @@ struct xinput_controller
 
         HANDLE read_event;
         OVERLAPPED read_ovl;
+        BOOL read_pending;
+        BOOL report_pending;
+        ULONG report_pending_len;
 
         char *input_report_buf;
         char *output_report_buf;
@@ -332,22 +335,29 @@ static BOOL controller_disable(struct xinput_controller *controller)
     HID_set_state(controller, &state);
     controller->enabled = FALSE;
 
-    CancelIoEx(controller->device, &controller->hid.read_ovl);
-    wait = WaitForSingleObject(controller->hid.read_ovl.hEvent, XINPUT_HID_CANCEL_TIMEOUT_MS);
-    if (wait == WAIT_TIMEOUT)
+    if (controller->hid.read_pending)
     {
-        WARN("timed out waiting for controller %Iu read cancellation\n", controller - controllers);
-        SetEvent(update_event);
-        return FALSE;
-    }
-    else if (wait == WAIT_FAILED)
-    {
-        WARN("failed waiting for controller %Iu read cancellation, error %lu\n",
-             controller - controllers, GetLastError());
-        SetEvent(update_event);
-        return FALSE;
+        CancelIoEx(controller->device, &controller->hid.read_ovl);
+        wait = WaitForSingleObject(controller->hid.read_ovl.hEvent, XINPUT_HID_CANCEL_TIMEOUT_MS);
+        if (wait == WAIT_TIMEOUT)
+        {
+            WARN("timed out waiting for controller %Iu read cancellation\n", controller - controllers);
+            SetEvent(update_event);
+            return FALSE;
+        }
+        else if (wait == WAIT_FAILED)
+        {
+            WARN("failed waiting for controller %Iu read cancellation, error %lu\n",
+                 controller - controllers, GetLastError());
+            SetEvent(update_event);
+            return FALSE;
+        }
     }
 
+    controller->hid.read_pending = FALSE;
+    controller->hid.report_pending = FALSE;
+    controller->hid.report_pending_len = 0;
+    ResetEvent(controller->hid.read_event);
     SetEvent(update_event);
     return TRUE;
 }
@@ -391,17 +401,33 @@ static void controller_enable(struct xinput_controller *controller)
     ULONG report_len = controller->hid.caps.InputReportByteLength;
     char *report_buf = controller->hid.input_report_buf;
     XINPUT_VIBRATION state = controller->vibration;
+    ULONG read_len = 0;
     BOOL ret;
 
     if (controller->enabled) return;
     HID_set_state(controller, &state);
     controller->enabled = TRUE;
 
+    ResetEvent(controller->hid.read_event);
+    controller->hid.read_pending = FALSE;
+    controller->hid.report_pending = FALSE;
+    controller->hid.report_pending_len = 0;
     memset(&controller->hid.read_ovl, 0, sizeof(controller->hid.read_ovl));
     controller->hid.read_ovl.hEvent = controller->hid.read_event;
-    ret = ReadFile(controller->device, report_buf, report_len, NULL, &controller->hid.read_ovl);
-    if (!ret && GetLastError() != ERROR_IO_PENDING) controller_destroy_locked(controller, TRUE);
-    else SetEvent(update_event);
+    ret = ReadFile(controller->device, report_buf, report_len, &read_len, &controller->hid.read_ovl);
+    if (ret)
+    {
+        controller->hid.report_pending = TRUE;
+        controller->hid.report_pending_len = read_len;
+        SetEvent(controller->hid.read_event);
+        SetEvent(update_event);
+    }
+    else if (GetLastError() == ERROR_IO_PENDING)
+    {
+        controller->hid.read_pending = TRUE;
+        SetEvent(update_event);
+    }
+    else controller_destroy_locked(controller, TRUE);
 }
 
 static BOOL controller_init(struct xinput_controller *controller, PHIDP_PREPARSED_DATA preparsed,
@@ -617,7 +643,28 @@ static void read_controller_state(struct xinput_controller *controller)
     ULONG i, button_length, value;
     BOOL ret;
 
-    if (!GetOverlappedResult(controller->device, &controller->hid.read_ovl, &read_len, TRUE))
+    if (!controller_enter(controller)) return;
+    if (controller->hid.report_pending)
+    {
+        ret = TRUE;
+        read_len = controller->hid.report_pending_len;
+        controller->hid.report_pending = FALSE;
+        controller->hid.report_pending_len = 0;
+        ResetEvent(controller->hid.read_event);
+        LeaveCriticalSection(&controller->crit);
+    }
+    else
+    {
+        LeaveCriticalSection(&controller->crit);
+        ret = GetOverlappedResult(controller->device, &controller->hid.read_ovl, &read_len, FALSE);
+        if (ret && controller_enter(controller))
+        {
+            controller->hid.read_pending = FALSE;
+            LeaveCriticalSection(&controller->crit);
+        }
+    }
+
+    if (!ret)
     {
         if (GetLastError() == ERROR_OPERATION_ABORTED) return;
         if (GetLastError() == ERROR_ACCESS_DENIED || GetLastError() == ERROR_INVALID_HANDLE ||
@@ -704,10 +751,22 @@ static void read_controller_state(struct xinput_controller *controller)
         {
             state.dwPacketNumber = controller->state.dwPacketNumber + 1;
             controller->state = state;
+            ResetEvent(controller->hid.read_event);
+            controller->hid.read_pending = FALSE;
+            controller->hid.report_pending = FALSE;
+            controller->hid.report_pending_len = 0;
             memset(&controller->hid.read_ovl, 0, sizeof(controller->hid.read_ovl));
             controller->hid.read_ovl.hEvent = controller->hid.read_event;
-            ret = ReadFile(controller->device, report_buf, report_len, NULL, &controller->hid.read_ovl);
-            if (!ret && GetLastError() != ERROR_IO_PENDING) controller_destroy_locked(controller, TRUE);
+            ret = ReadFile(controller->device, report_buf, report_len, &read_len, &controller->hid.read_ovl);
+            if (ret)
+            {
+                controller->hid.report_pending = TRUE;
+                controller->hid.report_pending_len = read_len;
+                SetEvent(controller->hid.read_event);
+                SetEvent(update_event);
+            }
+            else if (GetLastError() == ERROR_IO_PENDING) controller->hid.read_pending = TRUE;
+            else controller_destroy_locked(controller, TRUE);
         }
         LeaveCriticalSection(&controller->crit);
     }

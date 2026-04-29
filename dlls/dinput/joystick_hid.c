@@ -180,6 +180,9 @@ struct hid_joystick
 
     HANDLE device;
     OVERLAPPED read_ovl;
+    BOOL read_pending;
+    BOOL report_pending;
+    ULONG report_pending_len;
     PHIDP_PREPARSED_DATA preparsed;
 
     WCHAR device_path[MAX_PATH];
@@ -985,6 +988,7 @@ static HRESULT hid_joystick_acquire( IDirectInputDevice8W *iface )
 {
     struct hid_joystick *impl = impl_from_IDirectInputDevice8W( iface );
     ULONG report_len = impl->caps.InputReportByteLength;
+    DWORD count = 0;
     BOOL ret;
 
     if (impl->device == INVALID_HANDLE_VALUE)
@@ -994,10 +998,21 @@ static HRESULT hid_joystick_acquire( IDirectInputDevice8W *iface )
         if (impl->device == INVALID_HANDLE_VALUE) return DIERR_UNPLUGGED;
     }
 
+    ResetEvent( impl->base.read_event );
+    impl->read_pending = FALSE;
+    impl->report_pending = FALSE;
+    impl->report_pending_len = 0;
     memset( &impl->read_ovl, 0, sizeof(impl->read_ovl) );
     impl->read_ovl.hEvent = impl->base.read_event;
-    ret = ReadFile( impl->device, impl->input_report_buf, report_len, NULL, &impl->read_ovl );
-    if (!ret && GetLastError() != ERROR_IO_PENDING)
+    ret = ReadFile( impl->device, impl->input_report_buf, report_len, &count, &impl->read_ovl );
+    if (ret)
+    {
+        impl->report_pending = TRUE;
+        impl->report_pending_len = count;
+        SetEvent( impl->base.read_event );
+    }
+    else if (GetLastError() == ERROR_IO_PENDING) impl->read_pending = TRUE;
+    else
     {
         CloseHandle( impl->device );
         impl->device = INVALID_HANDLE_VALUE;
@@ -1017,9 +1032,16 @@ static HRESULT hid_joystick_unacquire( IDirectInputDevice8W *iface )
 
     if (impl->device == INVALID_HANDLE_VALUE) return DI_NOEFFECT;
 
-    ret = CancelIoEx( impl->device, &impl->read_ovl );
-    if (!ret) WARN( "CancelIoEx failed, last error %lu\n", GetLastError() );
-    else WaitForSingleObject( impl->base.read_event, INFINITE );
+    if (impl->read_pending)
+    {
+        ret = CancelIoEx( impl->device, &impl->read_ovl );
+        if (!ret) WARN( "CancelIoEx failed, last error %lu\n", GetLastError() );
+        else WaitForSingleObject( impl->base.read_event, INFINITE );
+    }
+    impl->read_pending = FALSE;
+    impl->report_pending = FALSE;
+    impl->report_pending_len = 0;
+    ResetEvent( impl->base.read_event );
 
     if (!(impl->base.caps.dwFlags & DIDC_FORCEFEEDBACK)) return DI_OK;
     if (!is_exclusively_acquired( impl )) return DI_OK;
@@ -1369,18 +1391,39 @@ static HRESULT hid_joystick_read( IDirectInputDevice8W *iface )
     USAGE_AND_PAGE *usages;
     NTSTATUS status;
     HRESULT hr;
+    DWORD error;
     BOOL ret;
 
-    ret = GetOverlappedResult( impl->device, &impl->read_ovl, &count, FALSE );
+    EnterCriticalSection( &impl->base.crit );
+    if (impl->report_pending)
+    {
+        ret = TRUE;
+        count = impl->report_pending_len;
+        impl->report_pending = FALSE;
+        impl->report_pending_len = 0;
+        ResetEvent( impl->base.read_event );
+        LeaveCriticalSection( &impl->base.crit );
+    }
+    else
+    {
+        LeaveCriticalSection( &impl->base.crit );
+        ret = GetOverlappedResult( impl->device, &impl->read_ovl, &count, FALSE );
+        if (ret)
+        {
+            EnterCriticalSection( &impl->base.crit );
+            impl->read_pending = FALSE;
+            LeaveCriticalSection( &impl->base.crit );
+        }
+    }
 
     if (WaitForSingleObject(steam_overlay_event, 0) == WAIT_OBJECT_0) /* steam overlay is enabled */
         params.reset_state = TRUE;
     else
         params.reset_state = FALSE;
 
-    EnterCriticalSection( &impl->base.crit );
-    while (ret)
+    if (ret)
     {
+        EnterCriticalSection( &impl->base.crit );
         if (TRACE_ON(dinput))
         {
             TRACE( "iface %p, size %lu, report:\n", iface, count );
@@ -1462,21 +1505,45 @@ static HRESULT hid_joystick_read( IDirectInputDevice8W *iface )
                 if (effect->index == index) effect->status = effect_state;
             impl->base.force_feedback_state = device_state;
         }
+        LeaveCriticalSection( &impl->base.crit );
 
         memset( &impl->read_ovl, 0, sizeof(impl->read_ovl) );
         impl->read_ovl.hEvent = impl->base.read_event;
         ret = ReadFile( impl->device, report_buf, report_len, &count, &impl->read_ovl );
-    }
+        if (ret)
+        {
+            EnterCriticalSection( &impl->base.crit );
+            impl->report_pending = TRUE;
+            impl->report_pending_len = count;
+            SetEvent( impl->base.read_event );
+            LeaveCriticalSection( &impl->base.crit );
+            return DI_OK;
+        }
 
-    if (GetLastError() == ERROR_IO_PENDING || GetLastError() == ERROR_OPERATION_ABORTED) hr = DI_OK;
+        error = GetLastError();
+        if (error == ERROR_IO_PENDING)
+        {
+            EnterCriticalSection( &impl->base.crit );
+            impl->read_pending = TRUE;
+            LeaveCriticalSection( &impl->base.crit );
+            return DI_OK;
+        }
+    }
+    else error = GetLastError();
+
+    if (error == ERROR_IO_PENDING || error == ERROR_OPERATION_ABORTED) hr = DI_OK;
     else
     {
-        WARN( "GetOverlappedResult/ReadFile failed, error %lu\n", GetLastError() );
+        WARN( "GetOverlappedResult/ReadFile failed, error %lu\n", error );
+        EnterCriticalSection( &impl->base.crit );
         CloseHandle(impl->device);
         impl->device = INVALID_HANDLE_VALUE;
+        impl->read_pending = FALSE;
+        impl->report_pending = FALSE;
+        impl->report_pending_len = 0;
+        LeaveCriticalSection( &impl->base.crit );
         hr = DIERR_INPUTLOST;
     }
-    LeaveCriticalSection( &impl->base.crit );
 
     return hr;
 }
