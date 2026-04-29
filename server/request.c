@@ -61,6 +61,8 @@
 #include "security.h"
 #include "handle.h"
 #include "request_handlers.h"
+#include "esync.h"
+#include "fsync.h"
 
 /* Some versions of glibc don't define this */
 #ifndef SCM_RIGHTS
@@ -881,6 +883,21 @@ void open_master_socket(void)
     while (fd >= 0 && fd <= 2) fd = dup( fd );
 
     server_dir = create_server_dir( 1 );
+
+    /* WinNative: initialize FSync/ESync HERE, before acquire_lock() creates
+     * the master_socket fd. alloc_fd() (server/fd.c) creates an internal
+     * sync object via create_internal_sync(); when ESync is on, that object
+     * is routed through create_inproc_internal_sync() which calls
+     * esync_alloc_shm() — and if esync_init() hasn't run yet, the alloc
+     * either spins forever (old bug) or bails with shm_idx=0 (current
+     * defensive return), leaving the master socket's sync broken. Doing
+     * init here, after create_server_dir() has set config_dir_fd but
+     * before any fd objects are constructed, fixes both. main.c still
+     * calls these afterwards as a fallback; both inits are idempotent. */
+    if (do_fsync())
+        fsync_init();
+    if (do_esync())
+        esync_init();
 
     if (!foreground)
     {

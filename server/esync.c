@@ -52,11 +52,16 @@
 #include "../android/shm_utils/shm_utils.h"
 #endif
 
+#ifdef HAVE_SYS_EVENTFD_H
+/* File scope so esync_init() can clear it on init failure, downgrading the
+ * whole process to server-side sync without leaving callers to spin in
+ * esync_alloc_shm() against zeroed globals. */
+static int do_esync_cached = -1;
+#endif
+
 int do_esync(void)
 {
 #ifdef HAVE_SYS_EVENTFD_H
-    static int do_esync_cached = -1;
-
     if (do_esync_cached == -1)
     {
         const char *env = getenv("WINEESYNC");
@@ -75,6 +80,10 @@ static off_t shm_size;
 static void **shm_addrs;
 static int shm_addrs_size;  /* length of the allocated shm_addrs array */
 static long pagesize;
+/* Set to 1 only after esync_init() has fully populated shm_name, shm_fd,
+ * shm_size, and pagesize. esync_alloc_shm() refuses to run without this —
+ * its grow loop assumes pagesize > 0 and would spin forever otherwise. */
+static int is_esync_initialized;
 
 static void shm_cleanup(void)
 {
@@ -86,6 +95,13 @@ static void shm_cleanup(void)
 void esync_init(void)
 {
     struct stat st;
+
+    /* Idempotent: open_master_socket() now calls us early (right after
+     * create_server_dir() sets config_dir_fd) so the master socket fd's
+     * internal sync object can route through esync. main.c still calls
+     * esync_init() afterwards as a fallback; bail here so we don't double-
+     * unlink/recreate the shm file. */
+    if (is_esync_initialized) return;
 
     if (fstat( config_dir_fd, &st ) == -1)
         fatal_error( "cannot stat config dir\n" );
@@ -99,17 +115,52 @@ void esync_init(void)
 
     shm_fd = shm_open( shm_name, O_RDWR | O_CREAT | O_EXCL, 0644 );
     if (shm_fd == -1)
+    {
         perror( "shm_open" );
+        fprintf( stderr, "esync: shm_open failed — disabling ESync, falling back to server-side sync.\n" );
+#ifdef HAVE_SYS_EVENTFD_H
+        do_esync_cached = 0;
+#endif
+        shm_name[0] = '\0';
+        return;
+    }
 
     pagesize = sysconf( _SC_PAGESIZE );
+    if (pagesize <= 0)
+    {
+        fprintf( stderr, "esync: sysconf(_SC_PAGESIZE) returned %ld — disabling ESync.\n", pagesize );
+        close( shm_fd );
+        shm_unlink( shm_name );
+        shm_fd = -1;
+        pagesize = 0;
+#ifdef HAVE_SYS_EVENTFD_H
+        do_esync_cached = 0;
+#endif
+        shm_name[0] = '\0';
+        return;
+    }
 
     shm_addrs = calloc( 128, sizeof(shm_addrs[0]) );
     shm_addrs_size = 128;
 
     shm_size = pagesize;
     if (ftruncate( shm_fd, shm_size ) == -1)
+    {
         perror( "ftruncate" );
+        fprintf( stderr, "esync: initial ftruncate failed — disabling ESync.\n" );
+        close( shm_fd );
+        shm_unlink( shm_name );
+        shm_fd = -1;
+        shm_size = 0;
+        pagesize = 0;
+#ifdef HAVE_SYS_EVENTFD_H
+        do_esync_cached = 0;
+#endif
+        shm_name[0] = '\0';
+        return;
+    }
 
+    is_esync_initialized = 1;
     fprintf( stderr, "esync: up and running.\n" );
 
     atexit( shm_cleanup );
@@ -271,6 +322,19 @@ C_ASSERT(sizeof(struct event) == 8);
 unsigned int esync_alloc_shm( int fd, enum esync_type type, int initval, int max )
 {
     unsigned int shm_idx;
+
+    /* If init didn't run (e.g., env disagreed across the do_esync_cached/
+     * is_esync_initialized boundary, or shm_open failed), bail with a
+     * one-shot warning. The grow loop below relies on pagesize > 0 and
+     * would spin forever flooding stderr otherwise — see the 143 MB log
+     * incident on Android ARM64EC where this manifested. */
+    if (!is_esync_initialized)
+    {
+        static int warned;
+        if (!warned++)
+            fprintf( stderr, "esync: esync_alloc_shm called without esync_init — returning slot 0\n" );
+        return 0;
+    }
 
     /* Use the fd as index. fd is unique within the server process and
      * gets reused after close, so the slot can also be reused. */

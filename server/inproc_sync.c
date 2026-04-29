@@ -87,7 +87,18 @@ int get_inproc_device_fd(void)
         else if (ntsync_requested)
             fprintf( stderr, "wineserver: WINENTSYNC=1 but /dev/ntsync unavailable — checking ESync/FSync fallback.\n" );
         else if (do_fsync()) fd = FSYNC_USED_BY_SERVER;
-        else if (do_esync()) fd = ESYNC_USED_BY_SERVER;
+        /* WinNative: do NOT route server-internal sync (master socket fd,
+         * thread alert events, internal events) through ESync. ESync is
+         * for client-facing objects only — `create_esync` (server/esync.c)
+         * has its own correct init order and shm slot management. Routing
+         * server-internal sync here created a chicken-and-egg bootstrap:
+         * acquire_lock() needs the master socket's internal sync object
+         * before esync_init() can run, so esync_alloc_shm() returned the
+         * defensive slot 0 sentinel and every subsequent server-internal
+         * sync collided on that same slot, corrupting state and tripping
+         * the inproc_sync_signal() type assertion later. The init_first_thread
+         * reply path (server/thread.c) still sends ESYNC_USED_BY_SERVER +
+         * the shm fd to clients so client-side ESync remains active. */
     }
     return fd;
 }
@@ -315,8 +326,13 @@ static int inproc_sync_signal( struct object *obj, unsigned int access, int sign
     struct inproc_sync *sync = (struct inproc_sync *)obj;
     assert( obj->ops == &inproc_sync_ops );
 
-    if (!do_fsync())
+    if (!do_fsync() && !do_esync())
         assert( sync->type == INPROC_SYNC_INTERNAL || sync->type == INPROC_SYNC_EVENT ); /* never called for mutex / semaphore */
+    /* WinNative: when ESync is the active backend, sync->type holds an
+     * enum esync_type value (ESYNC_AUTO_EVENT/MANUAL_EVENT/AUTO_SERVER/
+     * MANUAL_SERVER) set by create_inproc_event_sync()/create_inproc_internal_sync().
+     * The signal_inproc_sync()/reset_inproc_sync() dispatchers know how to
+     * handle those, so just skip the NTSync-only assertion. */
     assert( signal == 0 || signal == 1 ); /* never called from signal_object */
 
     if (signal) signal_inproc_sync( sync );
