@@ -70,24 +70,43 @@ export ACLOCAL_PATH=$deps/lib/aclocal:$deps/share/aclocal
 export CPPFLAGS="-idirafter $deps/include --sysroot=$TOOLCHAIN/../sysroot"
 
 export C_OPTS="-Wno-declaration-after-statement -Wno-implicit-function-declaration -Wno-int-conversion -ffunction-sections -fdata-sections"
-# WinNative perf+LTO build: -O3, ARMv8 baseline features (+lse for modern
-# atomics, +crc for DXVK/vkd3d hashing, +crypto for TLS/AES), plus ThinLTO
-# on the ELF/unix side only. PE (arm64ec/aarch64/i386) side uses its own
-# CROSSCFLAGS pipeline via llvm-mingw and is NOT touched by these vars; if
-# you want PE LTO too, patch the Makefile's CROSSCFLAGS separately.
-export PERF_OPTS="-O3 -march=armv8-a+crypto+crc+lse -fomit-frame-pointer -fno-semantic-interposition"
+# WinNative perf+LTO build: -O3, ThinLTO on the ELF/unix side only. PE
+# (arm64ec/aarch64/i386) side uses its own CROSSCFLAGS pipeline via
+# llvm-mingw and is NOT touched by these vars; if you want PE LTO too,
+# patch the Makefile's CROSSCFLAGS separately.
+#
+# -march tied to the build profile so the binary runs on the device class
+# we're targeting:
+#   --enable-16kb-pages → API 35 / Android 15 / Cortex-A510+ class →
+#                         armv8-a+crypto+crc+lse  (LSE atomics, AES, SHA, CRC)
+#   default             → API 28 / Android 9+ / Cortex-A53/A57/A72/A73 class →
+#                         armv8-a  (no LSE — those CPUs are ARMv8.0 and SIGILL
+#                         on `casal`/`swpal`. Crypto+CRC dropped for max compat
+#                         since not all ARMv8.0 SoCs implement them.)
+# The 16k+API35 binary will not run on a pre-ARMv8.1 phone; the API 28 binary
+# runs on any ARMv8 phone but loses the modern-atomics speedup. By splitting
+# the two profiles, neither breaks the other.
+if [ "$ENABLE_16KB_PAGES" = "1" ]; then
+  ARCH_OPTS="-march=armv8-a+crypto+crc+lse"
+  ARCH_LD_OPT="-Wl,-plugin-opt=mcpu=armv8-a+crypto+crc+lse"
+else
+  ARCH_OPTS="-march=armv8-a"
+  ARCH_LD_OPT="-Wl,-plugin-opt=mcpu=armv8-a"
+fi
+export PERF_OPTS="-O3 $ARCH_OPTS -fomit-frame-pointer -fno-semantic-interposition"
 export LTO_OPTS="-flto=thin"
 export CFLAGS="$C_OPTS $PERF_OPTS $LTO_OPTS $PAGE_SIZE_CFLAGS --sysroot=$TOOLCHAIN/../sysroot"
 export CXXFLAGS="$C_OPTS $PERF_OPTS $LTO_OPTS $PAGE_SIZE_CFLAGS --sysroot=$TOOLCHAIN/../sysroot"
 # LDFLAGS: pass -flto=thin so the driver runs the LTO codegen stage at
-# link time; -Wl,-plugin-opt=mcpu preserves the ARM extensions through
-# post-LTO codegen so the linker doesn't regress to generic armv8-a.
+# link time; -Wl,-plugin-opt=mcpu preserves the ARM extensions (or lack
+# thereof) through post-LTO codegen so the linker doesn't regress or
+# upgrade past what the source set.
 # Bake a placeholder rpath so the linker emits a DT_RUNPATH section we can
 # rewrite after install with patchelf to a $ORIGIN-relative path. Trying to
 # pass a literal $ORIGIN through autoconf's LDFLAGS into make's recipes
 # loses to make's $-expansion ($O is a make variable reference); patchelf
 # avoids the escaping fight entirely. See --install step below.
-export LDFLAGS="-L$deps/lib -Wl,-rpath=$RUNTIME_PATH/lib $LTO_OPTS -Wl,-plugin-opt=mcpu=armv8-a+crypto+crc+lse -Wl,--gc-sections $PAGE_SIZE_LDFLAGS"
+export LDFLAGS="-L$deps/lib -Wl,-rpath=$RUNTIME_PATH/lib $LTO_OPTS $ARCH_LD_OPT -Wl,--gc-sections $PAGE_SIZE_LDFLAGS"
 
 export FREETYPE_CFLAGS="-I$deps/include/freetype2"
 export PULSE_CFLAGS="-I$deps/include/pulse"
