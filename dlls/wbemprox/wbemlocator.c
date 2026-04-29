@@ -168,6 +168,9 @@ static HRESULT WINAPI wbem_locator_ConnectServer(
     TRACE( "%p, %s, %s, %s, %s, %#lx, %s, %p, %p)\n", iface, debugstr_w(NetworkResource), debugstr_w(User),
            debugstr_w(Password), debugstr_w(Locale), SecurityFlags, debugstr_w(Authority), context, ppNamespace );
 
+    if (!ppNamespace) return WBEM_E_INVALID_PARAMETER;
+    *ppNamespace = NULL;
+
     hr = parse_resource( NetworkResource, &server, &namespace );
     if (hr != S_OK) return hr;
 

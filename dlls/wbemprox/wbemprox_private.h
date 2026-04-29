@@ -207,6 +207,7 @@ void free_query( struct query * );
 struct query *addref_query( struct query * );
 void release_query( struct query *query );
 HRESULT exec_query( enum wbm_namespace, const WCHAR *, IEnumWbemClassObject ** );
+HRESULT exec_query_empty( enum wbm_namespace, const WCHAR *, IEnumWbemClassObject ** );
 HRESULT parse_query( enum wbm_namespace, const WCHAR *, struct view **, struct list * );
 HRESULT create_view( enum view_type, enum wbm_namespace, const WCHAR *, const struct keyword *, const WCHAR *,
                      const struct property *, const struct expr *, struct view ** );

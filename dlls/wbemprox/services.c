@@ -214,6 +214,69 @@ struct wbem_services
     IWbemContext *context;
 };
 
+#if defined(__arm64ec__)
+static BOOL env_var_is_true( const WCHAR *name )
+{
+    WCHAR value[8];
+    DWORD len = GetEnvironmentVariableW( name, value, ARRAY_SIZE(value) );
+
+    return len && len < ARRAY_SIZE(value) && value[0] && value[0] != '0';
+}
+
+static BOOL contains_string_i( const WCHAR *str, const WCHAR *needle )
+{
+    SIZE_T needle_len;
+
+    if (!str || !needle) return FALSE;
+    needle_len = wcslen( needle );
+    if (!needle_len) return TRUE;
+
+    for (; *str; str++)
+        if (!wcsnicmp( str, needle, needle_len )) return TRUE;
+
+    return FALSE;
+}
+
+static BOOL is_arm64ec_fast_wbem_class( const WCHAR *str )
+{
+    static const WCHAR *classes[] =
+    {
+        L"MSSMBios_RawSMBiosTables",
+        L"MSFT_PhysicalDisk",
+        L"Win32_CacheMemory",
+        L"Win32_ComputerSystem",
+        L"Win32_ComputerSystemProduct",
+        L"Win32_DesktopMonitor",
+        L"Win32_DiskDrive",
+        L"Win32_DisplayControllerConfiguration",
+        L"Win32_NetworkAdapter",
+        L"Win32_NetworkAdapterConfiguration",
+        L"Win32_OperatingSystem",
+        L"Win32_PhysicalMemory",
+        L"Win32_PhysicalMemoryArray",
+        L"Win32_PnPEntity",
+        L"Win32_Processor",
+        L"Win32_SoundDevice",
+        L"Win32_SystemEnclosure",
+        L"Win32_VideoController",
+    };
+    unsigned int i;
+
+    if (env_var_is_true( L"WINE_ARM64EC_WBEMPROX_FULL" )) return FALSE;
+
+    for (i = 0; i < ARRAY_SIZE(classes); i++)
+        if (contains_string_i( str, classes[i] )) return TRUE;
+
+    return FALSE;
+}
+
+static HRESULT arm64ec_empty_query( enum wbm_namespace ns, const WCHAR *query, IEnumWbemClassObject **iter )
+{
+    WARN( "Arm64EC fast WMI path returning empty result for %s\n", debugstr_w(query) );
+    return exec_query_empty( ns, query, iter );
+}
+#endif
+
 static inline struct wbem_services *impl_from_IWbemServices( IWbemServices *iface )
 {
     return CONTAINING_RECORD( iface, struct wbem_services, IWbemServices_iface );
@@ -293,6 +356,8 @@ static HRESULT WINAPI wbem_services_OpenNamespace(
     TRACE( "%p, %s, %#lx, %p, %p, %p\n", iface, debugstr_w(strNamespace), lFlags,
            pCtx, ppWorkingNamespace, ppResult );
 
+    if (!ppWorkingNamespace) return WBEM_E_INVALID_PARAMETER;
+    *ppWorkingNamespace = NULL;
     if (ws->ns != WBEMPROX_NAMESPACE_LAST || !strNamespace)
         return WBEM_E_INVALID_NAMESPACE;
 
@@ -537,10 +602,20 @@ static HRESULT WINAPI wbem_services_GetObject(
     TRACE( "%p, %s, %#lx, %p, %p, %p\n", iface, debugstr_w(strObjectPath), lFlags,
            pCtx, ppObject, ppCallResult );
 
+    if (!ppObject) return WBEM_E_INVALID_PARAMETER;
+    *ppObject = NULL;
     if (lFlags) FIXME( "unsupported flags %#lx\n", lFlags );
 
     if (!strObjectPath || !strObjectPath[0])
         return create_class_object( services->ns, NULL, NULL, 0, NULL, ppObject );
+
+#if defined(__arm64ec__)
+    if (is_arm64ec_fast_wbem_class( strObjectPath ))
+    {
+        WARN( "Arm64EC fast WMI path returning not found for %s\n", debugstr_w(strObjectPath) );
+        return WBEM_E_NOT_FOUND;
+    }
+#endif
 
     return get_object( services->ns, strObjectPath, ppObject );
 }
@@ -679,10 +754,29 @@ static HRESULT WINAPI wbem_services_CreateInstanceEnum(
 
     TRACE( "%p, %s, %#lx, %p, %p\n", iface, debugstr_w(strClass), lFlags, pCtx, ppEnum );
 
+    if (!ppEnum) return WBEM_E_INVALID_PARAMETER;
+    *ppEnum = NULL;
+    if (!strClass) return WBEM_E_INVALID_PARAMETER;
     if (lFlags) FIXME( "unsupported flags %#lx\n", lFlags );
 
     hr = parse_path( strClass, &path );
     if (hr != S_OK) return hr;
+
+#if defined(__arm64ec__)
+    if (is_arm64ec_fast_wbem_class( strClass ))
+    {
+        WCHAR *query = query_from_path( path );
+        if (!query)
+        {
+            free_path( path );
+            return E_OUTOFMEMORY;
+        }
+        hr = arm64ec_empty_query( services->ns, query, ppEnum );
+        free( query );
+        free_path( path );
+        return hr;
+    }
+#endif
 
     hr = create_instance_enum( services->ns, path, ppEnum );
     free_path( path );
@@ -713,8 +807,14 @@ static HRESULT WINAPI wbem_services_ExecQuery(
     TRACE( "%p, %s, %s, %#lx, %p, %p\n", iface, debugstr_w(strQueryLanguage),
            debugstr_w(strQuery), lFlags, pCtx, ppEnum );
 
+    if (!ppEnum) return WBEM_E_INVALID_PARAMETER;
+    *ppEnum = NULL;
     if (!strQueryLanguage || !strQuery || !strQuery[0]) return WBEM_E_INVALID_PARAMETER;
     if (wcsicmp( strQueryLanguage, L"WQL" )) return WBEM_E_INVALID_QUERY_TYPE;
+#if defined(__arm64ec__)
+    if (is_arm64ec_fast_wbem_class( strQuery ))
+        return arm64ec_empty_query( services->ns, strQuery, ppEnum );
+#endif
     return exec_query( services->ns, strQuery, ppEnum );
 }
 
@@ -892,7 +992,19 @@ static HRESULT WINAPI wbem_services_ExecMethod(
     TRACE( "%p, %s, %s, %#lx, %p, %p, %p, %p\n", iface, debugstr_w(strObjectPath),
            debugstr_w(strMethodName), lFlags, context, pInParams, ppOutParams, ppCallResult );
 
+    if (ppOutParams) *ppOutParams = NULL;
+    if (ppCallResult) *ppCallResult = NULL;
+    if (!strObjectPath || !strMethodName) return WBEM_E_INVALID_PARAMETER;
     if (lFlags) FIXME( "flags %#lx not supported\n", lFlags );
+
+#if defined(__arm64ec__)
+    if (is_arm64ec_fast_wbem_class( strObjectPath ))
+    {
+        WARN( "Arm64EC fast WMI path returning not found for method %s.%s\n",
+              debugstr_w(strObjectPath), debugstr_w(strMethodName) );
+        return WBEM_E_NOT_FOUND;
+    }
+#endif
 
     if ((hr = parse_path( strObjectPath, &path )) != S_OK) return hr;
     if (!(str = query_from_path( path )))

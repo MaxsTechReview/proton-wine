@@ -798,6 +798,24 @@ done:
     return hr;
 }
 
+HRESULT exec_query_empty( enum wbm_namespace ns, const WCHAR *str, IEnumWbemClassObject **result )
+{
+    HRESULT hr;
+    struct query *query;
+
+    *result = NULL;
+    if (!(query = create_query( ns ))) return E_OUTOFMEMORY;
+    hr = parse_query( ns, str, &query->view, &query->mem );
+    if (hr != S_OK) goto done;
+
+    query->view->result_count = 0;
+    hr = EnumWbemClassObject_create( query, (void **)result );
+
+done:
+    release_query( query );
+    return hr;
+}
+
 BOOL is_result_prop( const struct view *view, const WCHAR *name )
 {
     const struct property *prop = view->proplist;
