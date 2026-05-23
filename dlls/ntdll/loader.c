@@ -1151,11 +1151,12 @@ void * WINAPI RtlFindExportedRoutineByName( HMODULE module, const char *name )
 static int use_lsteamclient(void)
 {
     WCHAR env[32];
-    static int use = -1;
-
-    if (use != -1) return use;
-
-    use = !get_env( L"PROTON_DISABLE_LSTEAMCLIENT", env, sizeof(env) ) || *env == '0';
+    /* WinNative / Proton-Findings.md §4.C: removed the `static int use = -1`
+     * cache. The old version locked in the very first PEB env read — which
+     * under wine-10/11 can happen before the PEB env is fully populated,
+     * leaving the gate stuck at `use=1` regardless of the env var. Re-read
+     * each call. Cost is a PEB lookup, not disk IO. */
+    int use = !get_env( L"PROTON_DISABLE_LSTEAMCLIENT", env, sizeof(env) ) || *env == '0';
     if (!use)
         ERR("lsteamclient disabled.\n");
     return use;

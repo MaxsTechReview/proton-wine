@@ -37,6 +37,9 @@ WINE_DECLARE_DEBUG_CHANNEL(pid);
 WINE_DECLARE_DEBUG_CHANNEL(timestamp);
 WINE_DECLARE_DEBUG_CHANNEL(microsecs);
 
+/* Forward decl for the FLS callback module-range guard (see RtlProcessFlsData). */
+PVOID WINAPI RtlPcToFileHeader( PVOID pc, PVOID *address );
+
 struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
 
 struct debug_info
@@ -726,10 +729,26 @@ void WINAPI DECLSPEC_HOTPATCH RtlProcessFlsData( void *teb_fls_data, ULONG flags
 
                 if (callback && callback != (void *)~(ULONG_PTR)0)
                 {
-                    TRACE_(relay)("Calling FLS callback %p, arg %p.\n", callback,
-                            fls->fls_data_chunks[i][index + 1]);
+                    /* WinNative / Proton-Findings.md §4.A: guard against stale
+                     * FLS callbacks left by DLLs that unloaded without clearing
+                     * their slots. RtlPcToFileHeader returns NULL for an
+                     * address outside any loaded module — skipping those is
+                     * strictly safer than invoking a pointer into freed memory.
+                     * Triggered by steamclient64.dll's DllMain failure-cleanup
+                     * under the wine-10/11 loader. */
+                    void *image_base = NULL;
+                    RtlPcToFileHeader( (PVOID)callback, &image_base );
+                    if (!image_base)
+                    {
+                        ERR_(thread)("Stale FLS callback %p — skipped (no loaded module).\n", callback);
+                    }
+                    else
+                    {
+                        TRACE_(relay)("Calling FLS callback %p, arg %p.\n", callback,
+                                fls->fls_data_chunks[i][index + 1]);
 
-                    callback( fls->fls_data_chunks[i][index + 1] );
+                        callback( fls->fls_data_chunks[i][index + 1] );
+                    }
                 }
                 fls->fls_data_chunks[i][index + 1] = NULL;
             }

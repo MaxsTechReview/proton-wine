@@ -1,0 +1,72 @@
+[wn-launcher] Steam Launcher in-process Steam launcher starting (pid=260 tid=264)
+[wn-launcher] game="C:\Program Files (x86)\Steam\steamapps\common\Monster Hunter Stories\MHST.exe"
+[wn-launcher] creds: user="maxjividen" steamId=76561198448983170 tokenLen=498 appId=2356560
+[wn-launcher] token JWT payload: { "iss": "steam", "sub": "76561198448983170", "aud": [ "client", "web", "renew", "derive" ], "exp": 1797675017, "nbf": 1770841091, "iat": 1779481091, "jti": "000E_283686BE_F42F6", "oat": 1779481091, "per": 1, "ip_subject": "173.187.240.37", "ip_confirmer": "173.187.240.37" }
+[wn-launcher] HKCU ActiveProcess + Steam install registry seeded (pid=260, activeUser=488717442, SteamPath set)
+[wn-launcher] staged empty C:\Program Files (x86)\Steam\config\config.vdf
+[wn-launcher] staged empty C:\Program Files (x86)\Steam\config\local.vdf
+[wn-launcher] app manifest staged: C:\Program Files (x86)\Steam\steamapps\appmanifest_2356560.acf (installdir="Monster Hunter Stories", StateFlags=4)
+[wn-launcher] STEAM_SSL_CERT_FILE=C:\Program Files (x86)\Steam\wnsteam_cacert.pem
+[wn-launcher] env probe: PROTON_DISABLE_LSTEAMCLIENT    libc=1          win32=1
+[wn-launcher] env probe: WINEDLLOVERRIDES               libc=lsteamclient= win32=lsteamclient=
+[wn-launcher] env probe: WINEDEBUG                      libc=+warn,+err,+fixme,+module,+loaddll,+seh win32=+warn,+err,+fixme,+module,+loaddll,+seh
+[wn-launcher] env probe: WINEESYNC                      libc=0          win32=0
+[wn-launcher] env probe: WINENTSYNC                     libc=0          win32=0
+[wn-launcher] env probe: PROTON_USE_WOW64               libc=0          win32=0
+[wn-launcher] preload msvcr120.dll: ok (0000007ffee40000)
+[wn-launcher] preload msvcp120.dll: ok (0000007ffeba0000)
+[wn-launcher] preload vcruntime140.dll: ok (0000007ffeb80000)
+[wn-launcher] preload msvcp140.dll: ok (0000007ffe8d0000)
+[wn-launcher] preload video64.dll: failed GLE=126 (continuing)
+[wn-launcher] preload SteamUI.dll: failed GLE=126 (continuing)
+[wn-launcher] preloads done; installing unhandled-exception filter
+[wn-launcher] UEF installed (prev=0000000140002500)
+[wn-launcher] modules(pre-LoadLibrary): base=0000000140000000 size=0x17000 name=steam.exe path=C:\Program Files (x86)\Steam\steam.exe
+[wn-launcher] modules(pre-LoadLibrary): base=0000007fffd30000 size=0x2ba000 name=ntdll.dll path=C:\windows\system32\ntdll.dll
+[wn-launcher] modules(pre-LoadLibrary): base=0000007fffbe0000 size=0x149000 name=kernel32.dll path=C:\windows\system32\kernel32.dll
+[wn-launcher] modules(pre-LoadLibrary): base=0000007fff880000 size=0x356000 name=kernelbase.dll path=C:\windows\system32\kernelbase.dll
+[wn-launcher] modules(pre-LoadLibrary): base=0000007fff7a0000 size=0xd1000 name=ADVAPI32.dll path=C:\windows\system32\ADVAPI32.dll
+[wn-launcher] modules(pre-LoadLibrary): base=0000007fff730000 size=0x67000 name=sechost.dll path=C:\windows\system32\sechost.dll
+[wn-launcher] modules(pre-LoadLibrary): base=0000007fff400000 size=0x326000 name=ucrtbase.dll path=C:\windows\system32\ucrtbase.dll
+[wn-launcher] modules(pre-LoadLibrary): base=0000007fff160000 size=0x299000 name=msvcrt.dll path=C:\windows\system32\msvcrt.dll
+[wn-launcher] modules(pre-LoadLibrary): base=0000007ffee40000 size=0x319000 name=msvcr120.dll path=C:\windows\system32\msvcr120.dll
+[wn-launcher] modules(pre-LoadLibrary): base=0000007ffeba0000 size=0x296000 name=msvcp120.dll path=C:\windows\system32\msvcp120.dll
+[wn-launcher] modules(pre-LoadLibrary): base=0000007ffeb80000 size=0x12000 name=vcruntime140.dll path=C:\windows\system32\vcruntime140.dll
+[wn-launcher] modules(pre-LoadLibrary): base=0000007ffe8d0000 size=0x2a8000 name=msvcp140.dll path=C:\windows\system32\msvcp140.dll
+[wn-launcher] modules(pre-LoadLibrary): base=0000007ffe860000 size=0x6f000 name=concrt140.dll path=C:\windows\system32\concrt140.dll
+[wn-launcher] modules(pre-LoadLibrary): total=13
+[wn-launcher] load strategy 1/5 (LOAD_WITH_ALTERED_SEARCH_PATH) FAILED, GLE=998
+[wn-launcher] load strategy 2/5 (no flags) FAILED, GLE=998
+[wn-launcher] load strategy 3/5 (SEARCH_DEFAULT_DIRS) FAILED, GLE=998
+[wn-launcher] load strategy 4/5 (SEARCH_DEFAULT_DIRS + IGNORE_CFG) FAILED, GLE=998
+[wn-launcher] load strategy 5/5 (DLL_LOAD_DIR + SYSTEM32) FAILED, GLE=998
+[wn-launcher] steamclient64.dll cold-start retry round 1/3 after 500ms
+[wn-launcher] steamclient64.dll cold-start retry round 2/3 after 500ms
+[wn-launcher] steamclient64.dll cold-start retry round 3/3 after 500ms
+[wn-launcher] diag: DATAFILE load OK — file is well-formed; failure is in DllMain/runtime init
+[wn-launcher] LoadLibrary(C:\Program Files (x86)\Steam\steamclient64.dll) FAILED after all strategies, last GLE=998
+[wn-launcher] UEF: tid=264 pid=260 exc=0xc0000005 at 0000007ffdf2ae08 mod='(unknown)' bytes=
+[wn-launcher] UEF: AV DEP fault_addr=0x7ffdf2ae08
+[wn-launcher] UEF: page base=0000007ffdf2a000 size=0x936000 state=0x10000 protect=0x1 alloc_protect=0x0 type=0x0
+[wn-launcher] UEF: ctx Rip=7ffdf2ae08 Rsp=30fd88 Rbp=e
+[wn-launcher] UEF: ctx Rax=5cd60 Rcx=ffffffffffffffff Rdx=7fffdc2828 Rbx=0
+[wn-launcher] UEF: ctx Rsi=592a0 Rdi=18 R8=7fffdaa575 R9=7fffdaa52a
+[wn-launcher] UEF: stack[0..7]=7fffd8d1d3 7fffd9d8d2 1 30fe88 f0000 7ffdf2ae08 ffffffffffffffff 10000000d 
+[wn-launcher] modules(UEF): base=0000000140000000 size=0x17000 name=steam.exe path=C:\Program Files (x86)\Steam\steam.exe
+[wn-launcher] modules(UEF): base=0000007fffd30000 size=0x2ba000 name=ntdll.dll path=C:\windows\system32\ntdll.dll
+[wn-launcher] modules(UEF): base=0000007fffbe0000 size=0x149000 name=kernel32.dll path=C:\windows\system32\kernel32.dll
+[wn-launcher] modules(UEF): base=0000007fff880000 size=0x356000 name=kernelbase.dll path=C:\windows\system32\kernelbase.dll
+[wn-launcher] modules(UEF): base=0000007fff7a0000 size=0xd1000 name=ADVAPI32.dll path=C:\windows\system32\ADVAPI32.dll
+[wn-launcher] modules(UEF): base=0000007fff730000 size=0x67000 name=sechost.dll path=C:\windows\system32\sechost.dll
+[wn-launcher] modules(UEF): base=0000007fff400000 size=0x326000 name=ucrtbase.dll path=C:\windows\system32\ucrtbase.dll
+[wn-launcher] modules(UEF): base=0000007fff160000 size=0x299000 name=msvcrt.dll path=C:\windows\system32\msvcrt.dll
+[wn-launcher] modules(UEF): base=0000007ffee40000 size=0x319000 name=msvcr120.dll path=C:\windows\system32\msvcr120.dll
+[wn-launcher] modules(UEF): base=0000007ffeba0000 size=0x296000 name=msvcp120.dll path=C:\windows\system32\msvcp120.dll
+[wn-launcher] modules(UEF): base=0000007ffeb80000 size=0x12000 name=vcruntime140.dll path=C:\windows\system32\vcruntime140.dll
+[wn-launcher] modules(UEF): base=0000007ffe8d0000 size=0x2a8000 name=msvcp140.dll path=C:\windows\system32\msvcp140.dll
+[wn-launcher] modules(UEF): base=0000007ffe860000 size=0x6f000 name=concrt140.dll path=C:\windows\system32\concrt140.dll
+[wn-launcher] modules(UEF): base=0000007ffcae0000 size=0x489000 name=USER32.dll path=C:\windows\system32\USER32.dll
+[wn-launcher] modules(UEF): base=0000007ffc8f0000 size=0x1ec000 name=gdi32.dll path=C:\windows\system32\gdi32.dll
+[wn-launcher] modules(UEF): base=0000007ffc8a0000 size=0x43000 name=win32u.dll path=C:\windows\system32\win32u.dll
+[wn-launcher] modules(UEF): base=0000007ffa8b0000 size=0x5e000 name=imm32.dll path=C:\windows\system32\imm32.dll
+[wn-launcher] modules(UEF): total=17

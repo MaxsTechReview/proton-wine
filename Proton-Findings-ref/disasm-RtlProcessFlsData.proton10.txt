@@ -1,0 +1,135 @@
+=== Proton 10.0-4 ntdll.dll RtlProcessFlsData disassembly ===
+Source: /home/max/WinNative/Proton/Proton-Findings-ref/proton10_ntdll.dll
+(pulled from device via: adb shell run-as com.winnative.cmod cat
+ files/contents/Proton/10.0-4-x86_64-0/lib/wine/x86_64-windows/ntdll.dll)
+
+Function: RtlProcessFlsData (exported, RVA 0x5d0e0)
+ImageBase: 0x170000000
+Fault VA:  0x17005d1d0  (call *%r14 — invokes FLS callback)
+Fault PC:  0x17005d1d3  (next instruction; reported as Rip+offset 0xf3)
+
+
+/tmp/proton10_ntdll.dll:     file format pei-x86-64
+
+
+Disassembly of section .text:
+
+000000017005d0e0 <RtlProcessFlsData>:
+   17005d0e0:	41 57                	push   %r15
+   17005d0e2:	41 56                	push   %r14
+   17005d0e4:	41 55                	push   %r13
+   17005d0e6:	41 54                	push   %r12
+   17005d0e8:	56                   	push   %rsi
+   17005d0e9:	57                   	push   %rdi
+   17005d0ea:	55                   	push   %rbp
+   17005d0eb:	53                   	push   %rbx
+   17005d0ec:	48 83 ec 38          	sub    $0x38,%rsp
+   17005d0f0:	89 d7                	mov    %edx,%edi
+   17005d0f2:	48 89 ce             	mov    %rcx,%rsi
+   17005d0f5:	f6 05 1c 57 03 00 08 	testb  $0x8,0x3571c(%rip)        # 170092818 <__wine_dbch_thread>
+   17005d0fc:	74 28                	je     17005d126 <RtlProcessFlsData+0x46>
+   17005d0fe:	89 7c 24 28          	mov    %edi,0x28(%rsp)
+   17005d102:	48 89 74 24 20       	mov    %rsi,0x20(%rsp)
+   17005d107:	48 8d 15 0a 57 03 00 	lea    0x3570a(%rip),%rdx        # 170092818 <__wine_dbch_thread>
+   17005d10e:	4c 8d 05 60 d4 01 00 	lea    0x1d460(%rip),%r8        # 17007a575 <??_C@_0BC@KJGAHPBD@RtlProcessFlsData?$AA@>
+   17005d115:	4c 8d 0d 3b d4 01 00 	lea    0x1d43b(%rip),%r9        # 17007a557 <??_C@_0BO@DCDJDOLE@teb_fls_data?5?$CFp?0?5flags?5?$CF?$CDlx?4?6?$AA@>
+   17005d11c:	b9 03 00 00 00       	mov    $0x3,%ecx
+   17005d121:	e8 da f6 ff ff       	call   17005c800 <wine_dbg_log>
+   17005d126:	83 ff 04             	cmp    $0x4,%edi
+   17005d129:	72 29                	jb     17005d154 <RtlProcessFlsData+0x74>
+   17005d12b:	f6 05 e6 56 03 00 01 	testb  $0x1,0x356e6(%rip)        # 170092818 <__wine_dbch_thread>
+   17005d132:	74 20                	je     17005d154 <RtlProcessFlsData+0x74>
+   17005d134:	89 7c 24 20          	mov    %edi,0x20(%rsp)
+   17005d138:	48 8d 15 d9 56 03 00 	lea    0x356d9(%rip),%rdx        # 170092818 <__wine_dbch_thread>
+   17005d13f:	4c 8d 05 2f d4 01 00 	lea    0x1d42f(%rip),%r8        # 17007a575 <??_C@_0BC@KJGAHPBD@RtlProcessFlsData?$AA@>
+   17005d146:	4c 8d 0d 6c d1 01 00 	lea    0x1d16c(%rip),%r9        # 17007a2b9 <??_C@_0BF@EHNCJHEH@Unknown?5flags?5?$CF?$CDlx?4?6?$AA@>
+   17005d14d:	31 c9                	xor    %ecx,%ecx
+   17005d14f:	e8 ac f6 ff ff       	call   17005c800 <wine_dbg_log>
+   17005d154:	48 85 f6             	test   %rsi,%rsi
+   17005d157:	0f 84 09 01 00 00    	je     17005d266 <RtlProcessFlsData+0x186>
+   17005d15d:	40 f6 c7 01          	test   $0x1,%dil
+   17005d161:	0f 84 f9 00 00 00    	je     17005d260 <RtlProcessFlsData+0x180>
+   17005d167:	89 7c 24 34          	mov    %edi,0x34(%rsp)
+   17005d16b:	48 8d 0d c6 56 03 00 	lea    0x356c6(%rip),%rcx        # 170092838 <fls_section>
+   17005d172:	e8 c9 ce ff ff       	call   17005a040 <RtlEnterCriticalSection>
+   17005d177:	31 db                	xor    %ebx,%ebx
+   17005d179:	4c 8d 2d 10 57 03 00 	lea    0x35710(%rip),%r13        # 170092890 <fls_data>
+   17005d180:	4c 8d 3d ee d3 01 00 	lea    0x1d3ee(%rip),%r15        # 17007a575 <??_C@_0BC@KJGAHPBD@RtlProcessFlsData?$AA@>
+   17005d187:	4c 8d 25 9c d3 01 00 	lea    0x1d39c(%rip),%r12        # 17007a52a <??_C@_0CC@OOACHMGA@Calling?5FLS?5callback?5?$CFp?0?5arg?5?$CFp?4@>
+   17005d18e:	eb 0d                	jmp    17005d19d <RtlProcessFlsData+0xbd>
+   17005d190:	48 ff c3             	inc    %rbx
+   17005d193:	48 83 fb 08          	cmp    $0x8,%rbx
+   17005d197:	0f 84 a2 00 00 00    	je     17005d23f <RtlProcessFlsData+0x15f>
+   17005d19d:	48 83 7c de 10 00    	cmpq   $0x0,0x10(%rsi,%rbx,8)
+   17005d1a3:	74 eb                	je     17005d190 <RtlProcessFlsData+0xb0>
+   17005d1a5:	49 8b 44 dd 00       	mov    0x0(%r13,%rbx,8),%rax
+   17005d1aa:	48 85 c0             	test   %rax,%rax
+   17005d1ad:	74 e1                	je     17005d190 <RtlProcessFlsData+0xb0>
+   17005d1af:	83 38 00             	cmpl   $0x0,(%rax)
+   17005d1b2:	74 dc                	je     17005d190 <RtlProcessFlsData+0xb0>
+   17005d1b4:	bd 10 00 00 00       	mov    $0x10,%ebp
+   17005d1b9:	89 d9                	mov    %ebx,%ecx
+   17005d1bb:	d3 e5                	shl    %cl,%ebp
+   17005d1bd:	bf 08 00 00 00       	mov    $0x8,%edi
+   17005d1c2:	eb 25                	jmp    17005d1e9 <RtlProcessFlsData+0x109>
+   17005d1c4:	66 66 66 2e 0f 1f 84 	data16 data16 cs nopw 0x0(%rax,%rax,1)
+   17005d1cb:	00 00 00 00 00 
+   17005d1d0:	41 ff d6             	call   *%r14
+   17005d1d3:	48 8b 44 de 10       	mov    0x10(%rsi,%rbx,8),%rax
+   17005d1d8:	48 c7 04 38 00 00 00 	movq   $0x0,(%rax,%rdi,1)
+   17005d1df:	00 
+   17005d1e0:	48 83 c7 08          	add    $0x8,%rdi
+   17005d1e4:	48 ff cd             	dec    %rbp
+   17005d1e7:	74 a7                	je     17005d190 <RtlProcessFlsData+0xb0>
+   17005d1e9:	48 8b 44 de 10       	mov    0x10(%rsi,%rbx,8),%rax
+   17005d1ee:	48 8b 0c 38          	mov    (%rax,%rdi,1),%rcx
+   17005d1f2:	48 85 c9             	test   %rcx,%rcx
+   17005d1f5:	74 e9                	je     17005d1e0 <RtlProcessFlsData+0x100>
+   17005d1f7:	49 8b 54 dd 00       	mov    0x0(%r13,%rbx,8),%rdx
+   17005d1fc:	4c 8b 34 7a          	mov    (%rdx,%rdi,2),%r14
+   17005d200:	49 8d 56 01          	lea    0x1(%r14),%rdx
+   17005d204:	48 83 fa 02          	cmp    $0x2,%rdx
+   17005d208:	72 ce                	jb     17005d1d8 <RtlProcessFlsData+0xf8>
+   17005d20a:	f6 05 17 56 03 00 08 	testb  $0x8,0x35617(%rip)        # 170092828 <__wine_dbch_relay>
+   17005d211:	74 bd                	je     17005d1d0 <RtlProcessFlsData+0xf0>
+   17005d213:	48 89 4c 24 28       	mov    %rcx,0x28(%rsp)
+   17005d218:	4c 89 74 24 20       	mov    %r14,0x20(%rsp)
+   17005d21d:	b9 03 00 00 00       	mov    $0x3,%ecx
+   17005d222:	48 8d 15 ff 55 03 00 	lea    0x355ff(%rip),%rdx        # 170092828 <__wine_dbch_relay>
+   17005d229:	4d 89 f8             	mov    %r15,%r8
+   17005d22c:	4d 89 e1             	mov    %r12,%r9
+   17005d22f:	e8 cc f5 ff ff       	call   17005c800 <wine_dbg_log>
+   17005d234:	48 8b 44 de 10       	mov    0x10(%rsi,%rbx,8),%rax
+   17005d239:	48 8b 0c 38          	mov    (%rax,%rdi,1),%rcx
+   17005d23d:	eb 91                	jmp    17005d1d0 <RtlProcessFlsData+0xf0>
+   17005d23f:	48 8b 06             	mov    (%rsi),%rax
+   17005d242:	48 8b 4e 08          	mov    0x8(%rsi),%rcx
+   17005d246:	48 89 48 08          	mov    %rcx,0x8(%rax)
+   17005d24a:	48 8b 06             	mov    (%rsi),%rax
+   17005d24d:	48 89 01             	mov    %rax,(%rcx)
+   17005d250:	48 8d 0d e1 55 03 00 	lea    0x355e1(%rip),%rcx        # 170092838 <fls_section>
+   17005d257:	e8 54 cf ff ff       	call   17005a1b0 <RtlLeaveCriticalSection>
+   17005d25c:	8b 7c 24 34          	mov    0x34(%rsp),%edi
+   17005d260:	40 f6 c7 02          	test   $0x2,%dil
+   17005d264:	75 11                	jne    17005d277 <RtlProcessFlsData+0x197>
+   17005d266:	48 83 c4 38          	add    $0x38,%rsp
+   17005d26a:	5b                   	pop    %rbx
+   17005d26b:	5d                   	pop    %rbp
+   17005d26c:	5f                   	pop    %rdi
+   17005d26d:	5e                   	pop    %rsi
+   17005d26e:	41 5c                	pop    %r12
+   17005d270:	41 5d                	pop    %r13
+   17005d272:	41 5e                	pop    %r14
+   17005d274:	41 5f                	pop    %r15
+   17005d276:	c3                   	ret
+   17005d277:	4c 8b 46 10          	mov    0x10(%rsi),%r8
+   17005d27b:	65 48 8b 04 25 30 00 	mov    %gs:0x30,%rax
+   17005d282:	00 00 
+   17005d284:	48 8b 40 60          	mov    0x60(%rax),%rax
+   17005d288:	48 8b 48 30          	mov    0x30(%rax),%rcx
+   17005d28c:	31 d2                	xor    %edx,%edx
+   17005d28e:	e8 3d 88 fc ff       	call   170025ad0 <RtlFreeHeap>
+   17005d293:	4c 8b 46 18          	mov    0x18(%rsi),%r8
+   17005d297:	65 48 8b 04 25 30 00 	mov    %gs:0x30,%rax
+   17005d29e:	00 00 
+
