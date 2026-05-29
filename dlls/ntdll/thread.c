@@ -726,10 +726,26 @@ void WINAPI DECLSPEC_HOTPATCH RtlProcessFlsData( void *teb_fls_data, ULONG flags
 
                 if (callback && callback != (void *)~(ULONG_PTR)0)
                 {
-                    TRACE_(relay)("Calling FLS callback %p, arg %p.\n", callback,
-                            fls->fls_data_chunks[i][index + 1]);
+                    MEMORY_BASIC_INFORMATION mbi;
+                    SIZE_T retlen;
+                    NTSTATUS qstatus = NtQueryVirtualMemory( GetCurrentProcess(), callback,
+                                                             MemoryBasicInformation,
+                                                             &mbi, sizeof(mbi), &retlen );
+                    if (qstatus != STATUS_SUCCESS ||
+                        mbi.State != MEM_COMMIT ||
+                        !(mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                                         PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+                    {
+                        ERR_(thread)("Stale FLS callback %p (state=%lx prot=%lx) - skipped.\n",
+                                     callback, (unsigned long)mbi.State, (unsigned long)mbi.Protect);
+                    }
+                    else
+                    {
+                        TRACE_(relay)("Calling FLS callback %p, arg %p.\n", callback,
+                                fls->fls_data_chunks[i][index + 1]);
 
-                    callback( fls->fls_data_chunks[i][index + 1] );
+                        callback( fls->fls_data_chunks[i][index + 1] );
+                    }
                 }
                 fls->fls_data_chunks[i][index + 1] = NULL;
             }

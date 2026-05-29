@@ -310,6 +310,7 @@ static int compare_context_attributes( const void *v1, const void *v2 )
 {
     const struct context_attribute_desc *a1 = v1, *a2 = v2;
 
+    if (v1 == v2) return 0;
     assert( a1->name != a2->name );
     return (int)a1->name - (int)a2->name;
 };

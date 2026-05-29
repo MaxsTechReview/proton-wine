@@ -588,6 +588,9 @@ enum x11drv_atoms
     XATOM_text_rtf,
     XATOM_text_richtext,
     XATOM_text_uri_list,
+#ifdef __ANDROID__
+    XATOM__NET_WM_HWND,
+#endif
     XATOM_GAMESCOPE_XALIA_OVERLAY,
     XATOM_GAMESCOPE_DISPLAY_EDID_PATH,
     NB_XATOMS

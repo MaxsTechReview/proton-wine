@@ -52,11 +52,15 @@
 #define __NR_futex_waitv 449
 #endif
 
+#ifdef __ANDROID__
+#include "../android/shm_utils/shm_utils.h"
+#endif
+
 int do_fsync_cached = -1;
 
 int fsync_check_support(void)
 {
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
     syscall( __NR_futex_waitv, 0, 0, 0, 0, 0 );
     return getenv( "WINEFSYNC" ) && atoi(getenv( "WINEFSYNC" )) && errno != ENOSYS && errno != EPERM;
 #else

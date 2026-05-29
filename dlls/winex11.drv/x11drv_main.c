@@ -204,6 +204,9 @@ const char * const X11DRV_atom_names[NB_XATOMS - FIRST_XATOM] =
     "text/rtf",
     "text/richtext",
     "text/uri-list",
+#ifdef __ANDROID__
+    "_NET_WM_HWND",
+#endif
     "GAMESCOPE_XALIA_OVERLAY",
     "GAMESCOPE_DISPLAY_EDID_PATH",
 };

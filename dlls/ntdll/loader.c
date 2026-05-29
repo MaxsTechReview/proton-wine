@@ -1151,9 +1151,7 @@ void * WINAPI RtlFindExportedRoutineByName( HMODULE module, const char *name )
 static int use_lsteamclient(void)
 {
     WCHAR env[32];
-    static int use = -1;
-
-    if (use != -1) return use;
+    int use;
 
     use = !get_env( L"PROTON_DISABLE_LSTEAMCLIENT", env, sizeof(env) ) || *env == '0';
     if (!use)

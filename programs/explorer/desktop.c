@@ -1344,6 +1344,16 @@ void manage_desktop( WCHAR *arg )
         }
         SetThreadDesktop( desktop );
     }
+#if defined(__ANDROID__) || defined(__aarch64__)
+    else
+    {
+        int wine_no_duplicate_explorer = getenv("WINE_NO_DUPLICATE_EXPLORER") && atoi(getenv("WINE_NO_DUPLICATE_EXPLORER"));
+        if (wine_no_duplicate_explorer == 1)
+        {
+            ExitProcess( 0 );
+        }
+    }
+#endif
 
     /* the desktop process should always have an admin token */
     status = NtSetInformationProcess( GetCurrentProcess(), ProcessWineGrantAdminToken, NULL, 0 );

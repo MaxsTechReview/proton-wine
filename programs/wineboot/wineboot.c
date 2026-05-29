@@ -306,6 +306,10 @@ static UINT64 read_tsc_frequency(void)
     return freq;
 }
 
+static void initialize_xstate_features(struct _KUSER_SHARED_DATA *data)
+{
+}
+
 #elif defined(__aarch64__)
 
 #define FEX_TSC_SCALE_MAXIMUM 1000000000
@@ -323,11 +327,34 @@ static UINT64 read_tsc_frequency(void)
     return tsc_frequency;
 }
 
+static void initialize_xstate_features(struct _KUSER_SHARED_DATA *data)
+{
+    XSTATE_CONFIGURATION *xstate = &data->XState;
+
+    xstate->EnabledFeatures = (1 << XSTATE_LEGACY_FLOATING_POINT) | (1 << XSTATE_LEGACY_SSE) | (1 << XSTATE_AVX);
+    xstate->EnabledVolatileFeatures = xstate->EnabledFeatures;
+    xstate->AllFeatureSize = 0x340;
+
+    xstate->OptimizedSave = 0;
+    xstate->CompactionEnabled = 0;
+
+    xstate->Features[0].Size = xstate->AllFeatures[0] = offsetof(XSAVE_FORMAT, XmmRegisters);
+    xstate->Features[1].Size = xstate->AllFeatures[1] = sizeof(M128A) * 16;
+    xstate->Features[1].Offset = xstate->Features[0].Size;
+    xstate->Features[2].Offset = 0x240;
+    xstate->Features[2].Size = 0x100;
+    xstate->Size = 0x340;
+}
+
 #else
 
 static UINT64 read_tsc_frequency(void)
 {
     return 0;
+}
+
+static void initialize_xstate_features(struct _KUSER_SHARED_DATA *data)
+{
 }
 
 #endif
@@ -365,6 +392,8 @@ static void create_user_shared_data(void)
     data->NtMinorVersion              = version.dwMinorVersion;
     data->SuiteMask                   = version.wSuiteMask;
     wcscpy( data->NtSystemRoot, L"C:\\windows" );
+
+    initialize_xstate_features( data );
 
     UnmapViewOfFile( data );
 }

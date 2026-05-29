@@ -100,6 +100,10 @@
 #include "unix_private.h"
 #include "wine/debug.h"
 
+#ifdef __ANDROID__
+#include "../../android/shm_utils/shm_utils.h"
+#endif
+
 WINE_DEFAULT_DEBUG_CHANNEL(virtual);
 WINE_DECLARE_DEBUG_CHANNEL(module);
 WINE_DECLARE_DEBUG_CHANNEL(virtual_ranges);
@@ -314,9 +318,15 @@ static void *address_space_start = (void *)0x110000; /* keep DOS area clear */
 static void *address_space_start = (void *)0x10000;
 #endif
 #ifdef _WIN64
+#ifdef __ANDROID__
+static void *address_space_limit = (void *)0x7fffff0000;  /* top of the total available address space */
+static void *user_space_limit    = (void *)0x7fffff0000;  /* top of the user address space */
+static void *working_set_limit   = (void *)0x7fffff0000;  /* top of the current working set */
+#else
 static void *address_space_limit = (void *)0x7fffffff0000;  /* top of the total available address space */
 static void *user_space_limit    = (void *)0x7fffffff0000;  /* top of the user address space */
 static void *working_set_limit   = (void *)0x7fffffff0000;  /* top of the current working set */
+#endif
 #else
 static void *address_space_limit = (void *)0xc0000000;
 static void *user_space_limit    = (void *)0x7fff0000;
@@ -418,6 +428,7 @@ void *anon_mmap_alloc( size_t size, int prot )
 #ifdef USE_UFFD_WRITEWATCH
 static void kernel_writewatch_init(void)
 {
+#ifndef __ANDROID__
     struct uffdio_api uffdio_api;
 
     uffd_fd = syscall( __NR_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY );
@@ -439,6 +450,10 @@ static void kernel_writewatch_init(void)
     }
     use_kernel_writewatch = 1;
     TRACE( "Using kernel write watches.\n" );
+#else
+    TRACE( "Kernel writewatches are not supported on Android\n" );
+    use_kernel_writewatch = 0;
+#endif
 }
 
 static void kernel_writewatch_reset( void *start, SIZE_T len )
@@ -2021,7 +2036,17 @@ static NTSTATUS get_vprot_flags( DWORD protect, unsigned int *vprot, BOOL image 
 /***********************************************************************
  *           mprotect_exec
  *
- * Wrapper for mprotect, adds PROT_EXEC if forced by force_exec_prot
+ * Wrapper for mprotect, adds PROT_EXEC if forced by force_exec_prot.
+ *
+ * Android W^X workaround: kernels with W^X enforcement refuse mprotect()
+ * with PROT_WRITE|PROT_EXEC set simultaneously. PE images that mark a
+ * section as IMAGE_SCN_MEM_READ|MEM_WRITE|MEM_EXECUTE (e.g. Enigma-packed
+ * binaries) end up with the X bit silently stripped. If that happens,
+ * fall back to PROT_READ|PROT_EXEC here (the page becomes executable but
+ * not writable). Subsequent writes to the page will trap via SIGSEGV and
+ * virtual_handle_fault() flips the page back to PROT_READ|PROT_WRITE; an
+ * execute fault flips it back to PROT_READ|PROT_EXEC. This W<->X juggling
+ * is the standard JIT pattern that Android's own ART uses.
  */
 static inline int mprotect_exec( void *base, size_t size, int unix_prot )
 {
@@ -2033,7 +2058,89 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
         if (!(unix_prot & PROT_WRITE)) return -1;
     }
 
-    return mprotect( base, size, unix_prot );
+    /* First try the requested protection as-is. */
+    if (!mprotect( base, size, unix_prot )) return 0;
+    {
+        int saved_errno = errno;
+
+        /* Android noexec-mount escape hatch: if the caller wants PROT_EXEC
+         * and mprotect refused (EACCES typical when the file backing the
+         * mapping is on a `noexec` mount, e.g. /storage/emulated/0 FUSE),
+         * the only way to obtain an executable page at this address is to
+         * detach from the file and re-back the range with anonymous memory.
+         * Save current contents, atomically replace the mapping with anon,
+         * restore contents, then mprotect to the target permissions.
+         *
+         * This makes PE images loaded from /storage/emulated/0 (Android
+         * external storage), /sdcard, or any other noexec-mounted FS work
+         * for Box64-emulated execution. Same approach used by FEX (which
+         * is why arm64ec already works for these games) and by wine-bionic
+         * Android forks. */
+        if ((unix_prot & PROT_EXEC) && (saved_errno == EACCES || saved_errno == EPERM))
+        {
+            void *tmp;
+            int orig_prot = 0;
+
+            ERR( "mprotect(prot=0x%x) refused on %p-%p (errno=%d); attempting "
+                 "anon-remap to bypass noexec-FS\n",
+                 unix_prot, base, (char *)base + size - 1, saved_errno );
+
+            /* Make sure we can read the current contents. Most callers
+             * leave the page readable (initial PE mmap is PROT_READ), but
+             * be defensive — temporarily mprotect to R if needed. */
+            tmp = mmap( NULL, size, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0 );
+            if (tmp == MAP_FAILED) { errno = saved_errno; return -1; }
+
+            /* Save current contents. (PROT_R already set in normal load path.) */
+            memcpy( tmp, base, size );
+
+            /* Atomically replace the file-backed mapping with anonymous. */
+            if (mmap( base, size, PROT_READ | PROT_WRITE,
+                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0 ) == MAP_FAILED)
+            {
+                int e = errno;
+                ERR( "anon-remap: MAP_FIXED replace failed errno=%d (mapping unchanged)\n", e );
+                munmap( tmp, size );
+                errno = saved_errno;
+                return -1;
+            }
+
+            /* Restore contents into the new anonymous mapping. */
+            memcpy( base, tmp, size );
+            munmap( tmp, size );
+
+            /* Now mprotect with the target permissions. Anonymous memory is
+             * exec-able regardless of noexec mount flags. */
+            if (!mprotect( base, size, unix_prot ))
+            {
+                ERR( "anon-remap success: %p-%p now prot=0x%x (was file-backed on noexec FS)\n",
+                     base, (char *)base + size - 1, unix_prot );
+                return 0;
+            }
+            orig_prot = errno;
+
+            /* If even anon mmap can't get the requested prot (e.g. Android
+             * W^X strict-mode refusing W|X), fall back to dropping W. The
+             * fault handlers in virtual_handle_fault() will flip W<->X
+             * on demand for the rare RWX-section games. */
+            if ((unix_prot & PROT_WRITE) && (unix_prot & PROT_EXEC))
+            {
+                if (!mprotect( base, size, unix_prot & ~PROT_WRITE ))
+                {
+                    ERR( "anon-remap+W^X-strip: %p-%p got R+X (W will trap-and-flip)\n",
+                         base, (char *)base + size - 1 );
+                    return 0;
+                }
+            }
+            ERR( "anon-remap: mprotect after replacement still failed errno=%d\n", orig_prot );
+            errno = orig_prot;
+            return -1;
+        }
+
+        errno = saved_errno;
+    }
+    return -1;
 }
 
 
@@ -4934,11 +5041,39 @@ NTSTATUS virtual_handle_fault( EXCEPTION_RECORD *rec, void *stack )
                 mprotect_range( page, host_page_size, 0, 0 );
             }
         }
+        /* Android W^X flip: if page is supposed to be writable per vprot but
+         * lost W (because we previously had to drop W to keep X), restore W
+         * and drop X for now. Next execute fault will flip back. */
+        else if ((vprot & (VPROT_WRITE | VPROT_WRITECOPY)) && (vprot & VPROT_EXEC))
+        {
+            int prot = get_unix_prot( vprot ) & ~PROT_EXEC;
+            if (!mprotect( page, host_page_size, prot ))
+            {
+                WARN( "W^X flip W: %p now R+W (was R+X)\n", page );
+                ret = STATUS_SUCCESS;
+            }
+        }
         /* ignore fault if page is writable now */
         if (get_unix_prot( get_host_page_vprot( page )) & PROT_WRITE)
         {
             if ((vprot & VPROT_WRITEWATCH) || is_write_watch_range( page, 1 ))
                 ret = STATUS_SUCCESS;
+        }
+    }
+    else if (err == EXCEPTION_EXECUTE_FAULT)
+    {
+        /* Android W^X flip: if page is supposed to be executable per vprot
+         * but lost X (because we had to drop X to keep W on a previous flip,
+         * or because mprotect(W|X) was refused), restore X and drop W. Next
+         * write fault flips back. */
+        if ((vprot & VPROT_EXEC) && (vprot & (VPROT_WRITE | VPROT_WRITECOPY)))
+        {
+            int prot = get_unix_prot( vprot ) & ~PROT_WRITE;
+            if (!mprotect( page, host_page_size, prot ))
+            {
+                WARN( "W^X flip X: %p now R+X (was R+W)\n", page );
+                ret = STATUS_SUCCESS;
+            }
         }
     }
     mutex_unlock( &virtual_mutex );

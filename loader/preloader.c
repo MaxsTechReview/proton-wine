@@ -1491,6 +1491,8 @@ void* wld_start( void **stack )
             if (preload_info[i].addr >= (void *)0x10000
 #ifdef __aarch64__
                 && preload_info[i].addr < (void *)0x7fffffffff /* ARM64 address space might end here*/
+# elif __ANDROID__
+                && preload_info[i].addr < (void *)0x7fffffffff /* ARM64 address space might end here*/
 #endif
             )
                 wld_printf( "preloader: Warning: failed to reserve range %p-%p\n",

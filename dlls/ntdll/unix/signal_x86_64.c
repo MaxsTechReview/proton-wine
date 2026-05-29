@@ -2279,7 +2279,7 @@ __ASM_GLOBAL_FUNC( dump_syscall_fault_return,
                    "movq %rdi,%rsp\n\t"
                    "movq %rsi,%rax\n\t"
                    "movq %rdx,%r13\n\t"
-                   "jmp %rcx")
+                   "jmp *%rcx")
 
 
 static void dump_syscall_fault( CONTEXT *context, DWORD exc_code )
@@ -2867,6 +2867,7 @@ static void fpe_handler( int signal, siginfo_t *siginfo, void *sigcontext )
         rec.ExceptionInformation[1] = context.c.FltSave.MxCsr;
         if (CS_sig(ucontext) != cs64_sel) rec.ExceptionCode = STATUS_FLOAT_MULTIPLE_TRAPS;
     }
+
     setup_raise_exception( sigcontext, &rec, &context );
 }
 
