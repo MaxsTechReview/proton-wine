@@ -1,0 +1,137 @@
+name: Build Proton 11 B5 Arm64EC + UnixLibs + Steam (manual)
+
+# Manually-triggered build of the Arm64EC Proton with FEX UnixLibs support
+# (MemoryWineLoadUnixLibByName) and the Steam/Android ntdll fixes. The build
+# applies everything in android/patches/ on top of the source, so the UnixLibs
+# and Steam ntdll changes are baked in automatically.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up build environment
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git wget curl unzip flex bison gettext autoconf \
+            automake libtool pkg-config mingw-w64 gcc-multilib g++-multilib \
+            libfreetype6-dev libfreetype6-dev:i386 libpng-dev libpng-dev:i386 \
+            zlib1g-dev zlib1g-dev:i386
+
+      - name: Download and extract termuxfs (aarch64)
+        run: |
+          mkdir -p $HOME/termuxfs/aarch64
+          cd $HOME/termuxfs/aarch64
+          wget https://github.com/WinNative-Emu/proton-wine/releases/download/Assets/termuxfs-aarch64.tar
+          tar -xf termuxfs-aarch64.tar
+
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ~/Android/Sdk/ndk/27.3.13750724
+          key: android-ndk-r27d
+
+      - name: Set up Android NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p $HOME/Android/Sdk/ndk
+          cd $HOME/Android/Sdk/ndk
+          wget https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          unzip -q android-ndk-r27d-linux.zip
+          mv android-ndk-r27d 27.3.13750724
+
+      - name: Cache LLVM MinGW toolchain
+        id: cache-llvm-mingw
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchains/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64
+          key: bylaws-llvm-mingw-20250920
+
+      - name: Set up LLVM MinGW toolchain
+        if: steps.cache-llvm-mingw.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p $HOME/toolchains
+          cd $HOME/toolchains
+          wget https://github.com/bylaws/llvm-mingw/releases/download/20250920/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
+          tar -xf llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
+
+      - name: Autogen
+        run: bash build-scripts/build-step0-autogen.sh
+
+      - name: Build wine-tools (step 0)
+        run: bash build-scripts/build-step0.sh
+
+      - name: Build sysvshm library
+        run: bash build-scripts/build-step-arm64ec.sh --build-sysvshm
+
+      - name: "Configure (applies android/patches - UnixLibs + Steam ntdll fixes)"
+        run: bash build-scripts/build-step-arm64ec.sh --configure
+
+      - name: Build
+        run: bash build-scripts/build-step-arm64ec.sh --build
+
+      - name: Install
+        run: bash build-scripts/build-step-arm64ec.sh --install
+
+      - name: Verify UnixLibs support is compiled in
+        run: |
+          NM=$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm
+          NTDLL=$HOME/compiled-files-aarch64/lib/wine/aarch64-unix/ntdll.so
+          "$NM" --defined-only "$NTDLL" | grep -q load_unixlib_by_name \
+            && echo "OK: load_unixlib_by_name present in ntdll.so" \
+            || { echo "ERROR: UnixLibs support missing"; exit 1; }
+
+      - name: Download prefixPack (arm64ec)
+        run: |
+          wget https://github.com/WinNative-Emu/proton-wine/releases/download/Assets/prefixPack-arm64ec-11.txz -O $GITHUB_WORKSPACE/prefixPack.txz
+
+      - name: Generate Steam + UnixLibs profile.json
+        run: |
+          cat > $GITHUB_WORKSPACE/profile.json << 'JSON'
+          {
+            "type": "Proton",
+            "versionName": "11.0-b5-arm64ec-steam-unixlib",
+            "versionCode": 0,
+            "description": "Proton 11 Beta 5 Arm64EC + Steam + UnixLibs for WinNative",
+            "files": [],
+            "wine": {
+              "binPath": "bin",
+              "libPath": "lib",
+              "prefixPack": "prefixPack.txz"
+            }
+          }
+          JSON
+
+      - name: Package .wcp
+        run: |
+          OUT=$HOME/compiled-files-aarch64
+          cp $GITHUB_WORKSPACE/prefixPack.txz "$OUT/"
+          cp $GITHUB_WORKSPACE/profile.json "$OUT/"
+          cd "$OUT"
+          tar cJf Proton-11-B5-Arm64EC-Steam-UnixLibs.wcp bin lib share prefixPack.txz profile.json
+          mv Proton-11-B5-Arm64EC-Steam-UnixLibs.wcp $GITHUB_WORKSPACE/
+
+      - name: Upload .wcp artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Proton-11-B5-Arm64EC-Steam-UnixLibs
+          path: Proton-11-B5-Arm64EC-Steam-UnixLibs.wcp
+          retention-days: 30

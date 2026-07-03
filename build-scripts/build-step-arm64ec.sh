@@ -169,6 +169,7 @@ do
       "dlls_ntdll_unix_server.c.patch"
       "dlls_ntdll_unix_sync.c.patch"
       "dlls_ntdll_unix_virtual.c.patch"
+      "dlls_ntdll_fex_unixlib_byname.patch"
 	  "dlls_ntdll_unix_signal_x86_64.c.patch"
 	  
 	  # opengl32
