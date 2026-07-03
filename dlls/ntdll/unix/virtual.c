@@ -6376,6 +6376,37 @@ NTSTATUS WINAPI NtQueryVirtualMemory( HANDLE process, LPCVOID addr,
             }
             return STATUS_INVALID_HANDLE;
 
+        case MemoryWineLoadUnixLibByName:
+        case MemoryWineLoadUnixLibByNameWow64:
+            if (process == GetCurrentProcess())
+            {
+                UINT64 res[2];
+                void *handle;
+                const void *funcs;
+
+                if ((status = load_unixlib_by_name( addr, &handle ))) return status;
+                funcs = dlsym( handle, info_class == MemoryWineLoadUnixLibByNameWow64
+                                       ? "__wine_unix_call_wow64_funcs" : "__wine_unix_call_funcs" );
+                if (!funcs)
+                {
+                    dlclose( handle );
+                    return STATUS_ENTRYPOINT_NOT_FOUND;
+                }
+                res[0] = (UINT_PTR)handle;
+                res[1] = (UINT_PTR)funcs;
+                memcpy( buffer, res, min( len, sizeof(res) ));
+                return STATUS_SUCCESS;
+            }
+            return STATUS_INVALID_HANDLE;
+
+        case MemoryWineUnloadUnixLib:
+            if (process == GetCurrentProcess())
+            {
+                const UINT64 *handle = addr;
+                if (!dlclose( (void *)(UINT_PTR)*handle )) return STATUS_SUCCESS;
+            }
+            return STATUS_INVALID_HANDLE;
+
         default:
             FIXME("(%p,%p,info_class=%d,%p,%ld,%p) Unknown information class\n",
                   process, addr, info_class, buffer, len, res_len);

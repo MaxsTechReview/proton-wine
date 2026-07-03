@@ -1672,6 +1672,50 @@ done:
 
 
 /***********************************************************************
+ *           load_unixlib_by_name
+ */
+NTSTATUS load_unixlib_by_name( const UNICODE_STRING *nt_name, void **handle_ret )
+{
+    unsigned int i, len = nt_name->Length / sizeof(WCHAR);
+    void *handle = NULL;
+    char *name, *path;
+
+    if (!(name = malloc( len + sizeof(".so") ))) return STATUS_NO_MEMORY;
+    for (i = 0; i < len; i++)
+    {
+        WCHAR c = nt_name->Buffer[i];
+        if (c > 127) { free( name ); return STATUS_DLL_NOT_FOUND; }
+        name[i] = (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+    }
+    name[len] = 0;
+    if (!strchr( name, '.' )) strcat( name, ".so" );
+
+    if (build_dir && asprintf( &path, "%s/dlls/%s", build_dir, name ) != -1)
+    {
+        handle = dlopen( path, RTLD_NOW );
+        free( path );
+    }
+    for (i = 0; !handle && dll_paths[i]; i++)
+    {
+        if (asprintf( &path, "%s%s/%s", dll_paths[i], so_dir, name ) != -1)
+        {
+            handle = dlopen( path, RTLD_NOW );
+            free( path );
+        }
+        if (!handle && asprintf( &path, "%s/%s", dll_paths[i], name ) != -1)
+        {
+            handle = dlopen( path, RTLD_NOW );
+            free( path );
+        }
+    }
+    free( name );
+    if (!handle) return STATUS_DLL_NOT_FOUND;
+    *handle_ret = handle;
+    return STATUS_SUCCESS;
+}
+
+
+/***********************************************************************
  *           load_builtin
  *
  * Load the builtin dll if specified by load order configuration.
