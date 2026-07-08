@@ -126,7 +126,7 @@ jobs:
           cp $GITHUB_WORKSPACE/prefixPack.txz "$OUT/"
           cp $GITHUB_WORKSPACE/profile.json "$OUT/"
           cd "$OUT"
-          tar cJf Proton-11-B5-Arm64EC-Steam-UnixLibs.wcp bin lib share prefixPack.txz profile.json
+          tar cf - bin lib share prefixPack.txz profile.json | zstd -T0 -19 -o Proton-11-B5-Arm64EC-Steam-UnixLibs.wcp
           mv Proton-11-B5-Arm64EC-Steam-UnixLibs.wcp $GITHUB_WORKSPACE/
 
       - name: Upload .wcp artifact
