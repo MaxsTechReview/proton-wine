@@ -1,0 +1,152 @@
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 7282f76..9897062 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1739,6 +1739,51 @@ done:
+ }
+ 
+ 
++/***********************************************************************
++ *           load_unixlib_by_name
++ */
++NTSTATUS load_unixlib_by_name( const UNICODE_STRING *nt_name, void **handle_ret )
++{
++    const char *so_dir = get_so_dir( current_machine );
++    unsigned int i, len = nt_name->Length / sizeof(WCHAR);
++    void *handle = NULL;
++    char *name, *path;
++
++    if (!(name = malloc( len + sizeof(".so") ))) return STATUS_NO_MEMORY;
++    for (i = 0; i < len; i++)
++    {
++        WCHAR c = nt_name->Buffer[i];
++        if (c > 127) { free( name ); return STATUS_DLL_NOT_FOUND; }
++        name[i] = (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
++    }
++    name[len] = 0;
++    if (!strchr( name, '.' )) strcat( name, ".so" );
++
++    if (build_dir && asprintf( &path, "%s/dlls/%s", build_dir, name ) != -1)
++    {
++        handle = dlopen( path, RTLD_NOW );
++        free( path );
++    }
++    for (i = 0; !handle && dll_paths[i]; i++)
++    {
++        if (asprintf( &path, "%s%s/%s", dll_paths[i], so_dir, name ) != -1)
++        {
++            handle = dlopen( path, RTLD_NOW );
++            free( path );
++        }
++        if (!handle && asprintf( &path, "%s/%s", dll_paths[i], name ) != -1)
++        {
++            handle = dlopen( path, RTLD_NOW );
++            free( path );
++        }
++    }
++    free( name );
++    if (!handle) return STATUS_DLL_NOT_FOUND;
++    *handle_ret = handle;
++    return STATUS_SUCCESS;
++}
++
++
+ /***********************************************************************
+  *           load_builtin
+  *
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 2f649ca..83c0187 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -333,6 +333,7 @@ extern void virtual_fill_image_information( const struct pe_image_info *pe_info,
+                                             SECTION_IMAGE_INFORMATION *info );
+ extern void *get_builtin_so_handle( void *module );
+ extern NTSTATUS load_builtin_unixlib( void *module, const char *name );
++extern NTSTATUS load_unixlib_by_name( const UNICODE_STRING *name, void **handle_ret );
+ 
+ extern NTSTATUS get_thread_ldt_entry( HANDLE handle, THREAD_DESCRIPTOR_INFORMATION *info, ULONG len );
+ extern void *get_native_context( CONTEXT *context );
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index f31b5e4..21527f5 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -6786,6 +6786,37 @@ NTSTATUS WINAPI NtQueryVirtualMemory( HANDLE process, LPCVOID addr,
+             }
+             return STATUS_INVALID_HANDLE;
+ 
++        case MemoryWineLoadUnixLibByName:
++        case MemoryWineLoadUnixLibByNameWow64:
++            if (process == GetCurrentProcess())
++            {
++                UINT64 res[2];
++                void *handle;
++                const void *funcs;
++
++                if ((status = load_unixlib_by_name( addr, &handle ))) return status;
++                funcs = dlsym( handle, info_class == MemoryWineLoadUnixLibByNameWow64
++                                       ? "__wine_unix_call_wow64_funcs" : "__wine_unix_call_funcs" );
++                if (!funcs)
++                {
++                    dlclose( handle );
++                    return STATUS_ENTRYPOINT_NOT_FOUND;
++                }
++                res[0] = (UINT_PTR)handle;
++                res[1] = (UINT_PTR)funcs;
++                memcpy( buffer, res, min( len, sizeof(res) ));
++                return STATUS_SUCCESS;
++            }
++            return STATUS_INVALID_HANDLE;
++
++        case MemoryWineUnloadUnixLib:
++            if (process == GetCurrentProcess())
++            {
++                const UINT64 *handle = addr;
++                if (!dlclose( (void *)(UINT_PTR)*handle )) return STATUS_SUCCESS;
++            }
++            return STATUS_INVALID_HANDLE;
++
+         case MemoryFexStatsShm:
+ #if defined(linux) && defined(__aarch64__)
+             return get_memory_fex_stats_shm( process, addr, buffer, len, res_len );
+diff --git a/dlls/wow64/virtual.c b/dlls/wow64/virtual.c
+index cbaf6dd..30cb613 100644
+--- a/dlls/wow64/virtual.c
++++ b/dlls/wow64/virtual.c
+@@ -700,6 +700,23 @@ NTSTATUS WINAPI wow64_NtQueryVirtualMemory( UINT *args )
+         status = NtQueryVirtualMemory( handle, addr, MemoryWineUnixWow64Funcs, ptr, len, &res_len );
+         break;
+ 
++    case MemoryWineLoadUnixLibByNameWow64:
++        return STATUS_INVALID_INFO_CLASS;
++
++    case MemoryWineLoadUnixLibByName:
++    {
++        UNICODE_STRING32 *str32 = addr;
++        UNICODE_STRING str;
++
++        status = NtQueryVirtualMemory( handle, unicode_str_32to64( &str, str32 ),
++                                       MemoryWineLoadUnixLibByNameWow64, ptr, len, &res_len );
++        break;
++    }
++
++    case MemoryWineUnloadUnixLib:
++        status = NtQueryVirtualMemory( handle, addr, class, ptr, len, &res_len );
++        break;
++
+     default:
+         FIXME( "unsupported class %u\n", class );
+         return STATUS_INVALID_INFO_CLASS;
+diff --git a/include/winternl.h b/include/winternl.h
+index de65451..415f0fc 100644
+--- a/include/winternl.h
++++ b/include/winternl.h
+@@ -2465,6 +2465,9 @@ typedef enum _MEMORY_INFORMATION_CLASS {
+ #ifdef __WINESRC__
+     MemoryWineUnixFuncs = 1000,
+     MemoryWineUnixWow64Funcs,
++    MemoryWineLoadUnixLibByName = 1002,
++    MemoryWineLoadUnixLibByNameWow64,
++    MemoryWineUnloadUnixLib,
+ #endif
+     MemoryFexStatsShm = 2000,
+ } MEMORY_INFORMATION_CLASS;
