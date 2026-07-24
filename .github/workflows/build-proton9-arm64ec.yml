@@ -1,0 +1,272 @@
+name: Build Proton 9 Arm64EC (drive + controller fixes)
+
+# Builds the Proton 9 Arm64EC runtime with the fixes in android/patches-proton9
+# applied on top:
+#   * executables can be launched from D:/F:/G: (noexec external storage)
+#   * XInput / DirectInput / SDL controllers work again
+# The Proton 9 source tree already carries the start-menu fix, the FEX UnixLibs
+# support and the Steam patches in-tree, so those are preserved untouched.
+
+on:
+  # This workflow does not exist on the default branch, so GitHub will not
+  # accept a workflow_dispatch for it by file name. The push trigger is what
+  # actually starts it while it lives on a topic branch; once the branch is
+  # merged, workflow_dispatch below is the way to run it.
+  push:
+    branches:
+      - proton9-drive-controller-fix
+    paths:
+      - '.github/workflows/build-proton9-arm64ec.yml'
+      - 'android/patches-proton9/**'
+  workflow_dispatch:
+    inputs:
+      sdk:
+        description: Android SDK level (35 = 16KB pages, 28 = 4KB pages)
+        required: true
+        default: "35"
+        type: choice
+        options:
+          - "35"
+          - "28"
+      source_ref:
+        description: Proton 9 Arm64EC source branch
+        required: true
+        default: "proton_9.0_arm64ec"
+        type: string
+
+env:
+  # github.event.inputs is null for push events, so these are the defaults
+  # that a push-triggered run uses.
+  SDK_LEVEL: ${{ github.event.inputs.sdk || '35' }}
+  SRC_REF: ${{ github.event.inputs.source_ref || 'proton_9.0_arm64ec' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Checkout this repository (patches only)
+        uses: actions/checkout@v4
+        with:
+          path: fixes
+
+      - name: Checkout Proton 9 Arm64EC source
+        run: |
+          git clone --depth 1 -b "$SRC_REF" \
+            https://github.com/maxjivi05/proton-wine.git src
+          cd src
+          git log --oneline -1
+
+      - name: Verify the patches we must NOT lose are present
+        working-directory: src
+        run: |
+          set -e
+          echo "--- start menu fix"
+          grep -q "WINE_NO_DUPLICATE_EXPLORER" programs/explorer/desktop.c
+          echo "--- FEX UnixLibs support"
+          grep -q "load_unixlib_by_name" dlls/ntdll/unix/loader.c
+          grep -q "MemoryWineLoadUnixLibByName" include/winternl.h
+          echo "All pre-existing patches present."
+
+      - name: Apply drive + controller fixes
+        working-directory: src
+        run: |
+          set -e
+          for p in "$GITHUB_WORKSPACE"/fixes/android/patches-proton9/*.patch; do
+            echo "Applying $(basename "$p")"
+            git apply --verbose "$p"
+          done
+          echo "--- verifying fixes landed"
+          grep -q "anon-remap" dlls/ntdll/unix/virtual.c
+          grep -q "sdl_sonames" dlls/winebus.sys/bus_sdl.c
+          echo "Fixes applied."
+
+      - name: Set up build environment
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git wget curl unzip flex bison gettext autoconf \
+            automake libtool pkg-config mingw-w64 gcc-multilib g++-multilib \
+            libfreetype6-dev libfreetype6-dev:i386 libpng-dev libpng-dev:i386 \
+            zlib1g-dev zlib1g-dev:i386 zstd
+
+      - name: Download and extract termuxfs (aarch64)
+        run: |
+          mkdir -p $HOME/termuxfs/aarch64
+          cd $HOME/termuxfs/aarch64
+          wget -q https://github.com/WinNative-Emu/proton-wine/releases/download/Assets/termuxfs-aarch64.tar
+          tar -xf termuxfs-aarch64.tar
+
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ~/Android/Sdk/ndk/27.3.13750724
+          key: android-ndk-r27d
+
+      - name: Set up Android NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p $HOME/Android/Sdk/ndk
+          cd $HOME/Android/Sdk/ndk
+          wget -q https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          unzip -q android-ndk-r27d-linux.zip
+          mv android-ndk-r27d 27.3.13750724
+
+      - name: Cache LLVM MinGW toolchain
+        id: cache-llvm-mingw
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchains/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64
+          key: bylaws-llvm-mingw-20250920
+
+      - name: Set up LLVM MinGW toolchain
+        if: steps.cache-llvm-mingw.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p $HOME/toolchains
+          cd $HOME/toolchains
+          wget -q https://github.com/bylaws/llvm-mingw/releases/download/20250920/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
+          tar -xf llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
+
+      - name: Autogen
+        working-directory: src
+        run: ./autogen.sh
+
+      - name: Build wine-tools (step 0)
+        working-directory: src
+        run: bash build-scripts/build-step0.sh
+
+      - name: Configure
+        working-directory: src
+        run: |
+          EXTRA=""
+          if [ "$SDK_LEVEL" = "35" ]; then EXTRA="--enable-16kb-pages"; fi
+          # The script ends with a patch loop over android/patches/, which does
+          # not exist on this branch because every one of those patches is
+          # already applied in-tree. Those git apply calls fail and drag the
+          # script's exit status down with them, so assert on the real
+          # postconditions of configure instead of on its status.
+          bash build-scripts/build-step-arm64ec.sh $EXTRA --configure || true
+          test -f Makefile || { echo "configure did not produce a Makefile"; exit 1; }
+          test -f include/config.h || { echo "configure did not produce config.h"; exit 1; }
+          # Without udev, bus_sdl is winebus' only device backend: if configure
+          # missed SDL2 there would be no controller support at all, no matter
+          # what the patch above does.
+          grep -q "define SONAME_LIBSDL2" include/config.h \
+            || { echo "configure did not find SDL2 - controllers would not work"; exit 1; }
+          echo "Configure OK: $(grep 'define SONAME_LIBSDL2' include/config.h)"
+
+      - name: Build
+        working-directory: src
+        run: |
+          EXTRA=""
+          if [ "$SDK_LEVEL" = "35" ]; then EXTRA="--enable-16kb-pages"; fi
+          bash build-scripts/build-step-arm64ec.sh $EXTRA --build
+
+      - name: Install
+        working-directory: src
+        run: |
+          EXTRA=""
+          if [ "$SDK_LEVEL" = "35" ]; then EXTRA="--enable-16kb-pages"; fi
+          # Same story as Configure: the script's optional copies (e.g. notepad)
+          # can fail without the install itself having failed, so check the
+          # tree it was supposed to produce.
+          bash build-scripts/build-step-arm64ec.sh $EXTRA --install || true
+          OUT=$HOME/compiled-files-aarch64
+          for f in bin/wine lib/wine/aarch64-unix/ntdll.so \
+                   lib/wine/aarch64-unix/winebus.so lib/wine/aarch64-windows/explorer.exe; do
+            test -e "$OUT/$f" || { echo "install incomplete: missing $f"; exit 1; }
+          done
+          echo "Install OK"
+
+      - name: Verify the fixes are compiled into the binaries
+        run: |
+          set -e
+          OUT=$HOME/compiled-files-aarch64
+          NM=$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm
+
+          echo "--- UnixLibs support still present in ntdll.so"
+          "$NM" --defined-only "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q load_unixlib_by_name
+
+          echo "--- controller fix: winebus.so knows every SDL soname"
+          for n in libSDL2-2.0.so.0 libSDL2-2.0.so libSDL2.so; do
+            strings "$OUT/lib/wine/aarch64-unix/winebus.so" | grep -qx "$n" \
+              || { echo "MISSING SDL soname $n in winebus.so"; exit 1; }
+          done
+
+          echo "--- drive fix: ntdll.so carries the noexec anon-remap"
+          strings "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q "anon-remap"
+
+          echo "--- start menu fix still present in explorer.exe"
+          strings "$OUT/lib/wine/aarch64-windows/explorer.exe" | grep -q "WINE_NO_DUPLICATE_EXPLORER"
+
+          echo "All fixes verified in the built binaries."
+
+      - name: Strip binaries
+        run: |
+          STRIP=$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+          OUT=$HOME/compiled-files-aarch64
+          before=$(du -sm "$OUT" | cut -f1)
+          # Unix-side ELF objects: strip debug info only, keep the dynamic
+          # symbols the PE side resolves through __wine_unix_call.
+          find "$OUT" -type f \( -name '*.so' -o -name 'wine' -o -name 'wine-preloader' \) \
+            -exec "$STRIP" --strip-debug {} + 2>/dev/null || true
+          # PE side: drop debug sections.
+          find "$OUT" -type f \( -name '*.dll' -o -name '*.exe' -o -name '*.sys' -o -name '*.drv' \) \
+            -exec "$STRIP" --strip-debug {} + 2>/dev/null || true
+          after=$(du -sm "$OUT" | cut -f1)
+          echo "Stripped: ${before}MB -> ${after}MB"
+
+      - name: Re-verify after strip
+        run: |
+          set -e
+          OUT=$HOME/compiled-files-aarch64
+          NM=$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm
+          "$NM" --defined-only "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q load_unixlib_by_name
+          strings "$OUT/lib/wine/aarch64-unix/winebus.so" | grep -qx "libSDL2-2.0.so"
+          echo "Post-strip verification OK."
+
+      - name: Download prefixPack (arm64ec)
+        run: |
+          wget -q https://github.com/WinNative-Emu/proton-wine/releases/download/Assets/prefixPack-arm64ec-11.txz \
+            -O $GITHUB_WORKSPACE/prefixPack.txz
+
+      - name: Generate profile.json
+        run: |
+          cat > $GITHUB_WORKSPACE/profile.json << 'JSON'
+          {
+            "type": "Proton",
+            "versionName": "9.0-arm64ec-drivefix-controllerfix",
+            "versionCode": 0,
+            "description": "Proton 9.0 Arm64EC + Steam + UnixLibs, non-C: drive launching and controller input fixed",
+            "files": [],
+            "wine": {
+              "binPath": "bin",
+              "libPath": "lib",
+              "prefixPack": "prefixPack.txz"
+            }
+          }
+          JSON
+
+      - name: Package .wcp
+        run: |
+          OUT=$HOME/compiled-files-aarch64
+          cp $GITHUB_WORKSPACE/prefixPack.txz "$OUT/"
+          cp $GITHUB_WORKSPACE/profile.json "$OUT/"
+          cd "$OUT"
+          tar cf - bin lib share prefixPack.txz profile.json \
+            | zstd -T0 -19 -o Proton-9-Arm64EC-DriveFix-ControllerFix.wcp
+          mv Proton-9-Arm64EC-DriveFix-ControllerFix.wcp $GITHUB_WORKSPACE/
+          ls -lh $GITHUB_WORKSPACE/Proton-9-Arm64EC-DriveFix-ControllerFix.wcp
+
+      - name: Upload .wcp artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Proton-9-Arm64EC-DriveFix-ControllerFix-sdk${{ env.SDK_LEVEL }}
+          path: Proton-9-Arm64EC-DriveFix-ControllerFix.wcp
+          retention-days: 30
