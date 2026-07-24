@@ -150,11 +150,28 @@ jobs:
           # X_LIBS names this library, and configure links every X11 probe
           # against X_LIBS, so without it -lX11/-lXext/-lXi all report "not
           # found" and configure dies on --with-xshm.
-          bash "$GITHUB_WORKSPACE/fixes/android/android_sysvshm/build-aarch64.sh"
           DEPS=$HOME/termuxfs/aarch64/data/data/com.termux/files/usr
+          TC=$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin
+          SRC=$GITHUB_WORKSPACE/fixes/android/android_sysvshm
           mkdir -p "$DEPS/lib"
-          cp "$GITHUB_WORKSPACE/fixes/android/android_sysvshm/build-aarch64/libandroid-sysvshm.so" "$DEPS/lib/"
-          test -f "$DEPS/lib/libandroid-sysvshm.so"
+          # This tree's sys/shm.h renames shmat/shmget/shmdt/shmctl to
+          # libandroid_*, so winex11.drv's create_shm_image references those
+          # names. Our android_sysvshm.c defines the plain ones, which links
+          # against the newer tree but leaves the older one with undefined
+          # symbols. Compile it with the names this tree asks for. Note this
+          # yields only the libandroid_* entry points, not the plain ones, so
+          # the library is specific to this lineage.
+          "$TC/aarch64-linux-android28-clang" -Wall -std=gnu99 -shared -fPIC \
+            -I"$SRC" \
+            -Dshmget=libandroid_shmget -Dshmat=libandroid_shmat \
+            -Dshmdt=libandroid_shmdt -Dshmctl=libandroid_shmctl \
+            -o "$DEPS/lib/libandroid-sysvshm.so" "$SRC/android_sysvshm.c"
+          NM=$TC/llvm-nm
+          for sym in libandroid_shmget libandroid_shmat libandroid_shmdt libandroid_shmctl; do
+            "$NM" -D --defined-only "$DEPS/lib/libandroid-sysvshm.so" | grep -q " $sym$" \
+              || { echo "libandroid-sysvshm.so is missing $sym"; exit 1; }
+          done
+          echo "libandroid-sysvshm.so exports the libandroid_* entry points"
 
       - name: Autogen
         working-directory: src
