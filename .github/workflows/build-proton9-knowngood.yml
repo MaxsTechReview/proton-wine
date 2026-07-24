@@ -299,12 +299,13 @@ jobs:
           set -e
           # Same prefix the working package ships; its file list is identical to
           # the app's own proton-9.0-arm64ec container pattern.
-          curl -sL --retry 3 -o /tmp/ref.wcp \
+          curl -fsSL --retry 3 -o /tmp/ref.wcp \
             https://github.com/Xnick417x/winlator-nightly-wcp/releases/download/GameNative/Proton.9.0-arm64ec.wcp
           mkdir -p /tmp/ref && tar xJf /tmp/ref.wcp -C /tmp/ref prefixPack.txz
           cp /tmp/ref/prefixPack.txz $GITHUB_WORKSPACE/prefixPack.txz
           test "$(stat -c%s $GITHUB_WORKSPACE/prefixPack.txz)" -gt 1000000
-          tar tJf $GITHUB_WORKSPACE/prefixPack.txz | grep -q "^.wine/system.reg$"
+          # Entries in this archive are prefixed with ./ , so do not anchor on .wine
+          tar tJf $GITHUB_WORKSPACE/prefixPack.txz | grep -q "\.wine/system\.reg$"
           echo "prefixPack.txz = $(stat -c%s $GITHUB_WORKSPACE/prefixPack.txz) bytes"
 
       - name: Package .wcp
