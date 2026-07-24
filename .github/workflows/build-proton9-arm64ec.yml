@@ -133,6 +133,23 @@ jobs:
           wget -q https://github.com/bylaws/llvm-mingw/releases/download/20250920/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
           tar -xf llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
 
+      - name: Build android_sysvshm
+        run: |
+          set -e
+          # The Proton 9 build script sets X_LIBS=-landroid-sysvshm, and every
+          # X11 soname probe configure runs links against $X_LIBS. If that
+          # library is missing, -lX11/-lXext/-lXi all come back "not found" and
+          # configure dies on --with-xshm, which looks like missing X11 dev
+          # files but is not. The script's own --build-sysvshm cannot help: it
+          # needs android/android_sysvshm/, which only exists in this
+          # repository, not on the Proton 9 branch. So build it from here.
+          bash "$GITHUB_WORKSPACE/fixes/android/android_sysvshm/build-aarch64.sh"
+          DEPS=$HOME/termuxfs/aarch64/data/data/com.termux/files/usr
+          mkdir -p "$DEPS/lib"
+          cp "$GITHUB_WORKSPACE/fixes/android/android_sysvshm/build-aarch64/libandroid-sysvshm.so" "$DEPS/lib/"
+          test -f "$DEPS/lib/libandroid-sysvshm.so"
+          echo "libandroid-sysvshm.so installed into $DEPS/lib"
+
       - name: Autogen
         working-directory: src
         run: ./autogen.sh
@@ -151,9 +168,14 @@ jobs:
           # already applied in-tree. Those git apply calls fail and drag the
           # script's exit status down with them, so assert on the real
           # postconditions of configure instead of on its status.
-          bash build-scripts/build-step-arm64ec.sh $EXTRA --configure || true
-          test -f Makefile || { echo "configure did not produce a Makefile"; exit 1; }
-          test -f include/config.h || { echo "configure did not produce config.h"; exit 1; }
+          bash build-scripts/build-step-arm64ec.sh $EXTRA --configure 2>&1 | tee /tmp/configure.log || true
+          if [ ! -f Makefile ] || [ ! -f include/config.h ]; then
+            echo "=================================================="
+            echo "configure failed. Its own error lines:"
+            grep -E "configure: error|is an error since|not found" /tmp/configure.log | head -40
+            echo "=================================================="
+            exit 1
+          fi
           # Without udev, bus_sdl is winebus' only device backend: if configure
           # missed SDL2 there would be no controller support at all, no matter
           # what the patch above does.
