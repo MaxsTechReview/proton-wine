@@ -1,0 +1,323 @@
+name: Build Proton 9 Arm64EC (known-good base + UnixLibs)
+
+# Rebuilds the Proton 9 Arm64EC that is known to work -- start menu opens,
+# apps launch from every drive -- and adds nothing to it but the FEX UnixLibs
+# support.
+#
+# Why this exists. The published Proton.9.0-arm64ec.wcp that works correctly
+# was compared byte for byte against this build: its ntdll.so, winebus.so,
+# explorer.exe and bin/wine are identical to the Proton 9 the app itself
+# bundles, and it carries no drive fix and no controller fix at all. So the
+# problems were never missing fixes -- they came from building the newer tree.
+#
+# The proton_9.0_arm64ec branch was rebuilt on 2026-07-07 (53087150, "build on
+# pipetto-crypto arm64ec-ready wine-9 tree"). Everything before that is the
+# lineage that produced the working Aug 2025 binaries, and a470c2ed is its
+# last commit. That is what this builds.
+#
+# It also uses that tree's own build.sh configure line rather than the newer
+# build-scripts/, because the two differ in ways that reach the desktop:
+# build.sh passes --without-xinput --without-xinput2 --without-xcursor, and
+# the newer script does not, which turns on winex11's XInput2 pointer path
+# against the app's own X server.
+
+on:
+  push:
+    branches:
+      - proton9-drive-controller-fix
+    paths:
+      - '.github/workflows/build-proton9-knowngood.yml'
+      - 'android/patches-proton9-knowngood/**'
+  workflow_dispatch:
+    inputs:
+      api:
+        description: Android API level (28 = what the working build used)
+        required: true
+        default: "28"
+        type: choice
+        options:
+          - "28"
+          - "35"
+
+env:
+  API_LEVEL: ${{ github.event.inputs.api || '28' }}
+  SRC_COMMIT: a470c2ed
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Checkout this repository (patches only)
+        uses: actions/checkout@v4
+        with:
+          path: fixes
+
+      - name: Check out the known-good Proton 9 tree
+        run: |
+          set -e
+          git clone https://github.com/maxjivi05/proton-wine.git src
+          cd src
+          git checkout "$SRC_COMMIT"
+          git log --oneline -1
+          # This must be the pre-rebase lineage. If build-scripts/ exists we
+          # picked up the newer tree by mistake.
+          test ! -d build-scripts || { echo "wrong lineage: build-scripts/ present"; exit 1; }
+          test -f build.sh || { echo "build.sh missing - wrong commit"; exit 1; }
+
+      - name: Verify the start-menu fix is in this tree
+        working-directory: src
+        run: |
+          set -e
+          grep -q "WINE_NO_DUPLICATE_EXPLORER" programs/explorer/desktop.c
+          echo "start-menu fix present"
+
+      - name: Apply the UnixLibs patch (the only change we add)
+        working-directory: src
+        run: |
+          set -e
+          git apply --verbose \
+            "$GITHUB_WORKSPACE/fixes/android/patches-proton9-knowngood/0001-ntdll-unixlib-by-name.patch"
+          grep -q "load_unixlib_by_name" dlls/ntdll/unix/loader.c
+          grep -q "MemoryWineLoadUnixLibByName" include/winternl.h
+          # Nothing else may differ from the known-good tree.
+          git diff --name-only | sort > /tmp/changed.txt
+          cat /tmp/changed.txt
+          diff -u - /tmp/changed.txt <<'EOF'
+          dlls/ntdll/unix/loader.c
+          dlls/ntdll/unix/unix_private.h
+          dlls/ntdll/unix/virtual.c
+          dlls/wow64/virtual.c
+          include/winternl.h
+          EOF
+          echo "UnixLibs only; tree is otherwise the known-good source."
+
+      - name: Set up build environment
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git wget curl unzip flex bison gettext autoconf \
+            automake libtool pkg-config mingw-w64 gcc-multilib g++-multilib \
+            libfreetype6-dev libfreetype6-dev:i386 libpng-dev libpng-dev:i386 \
+            zlib1g-dev zlib1g-dev:i386 zstd
+
+      - name: Download and extract termuxfs (aarch64)
+        run: |
+          mkdir -p $HOME/termuxfs/aarch64
+          cd $HOME/termuxfs/aarch64
+          wget -q https://github.com/WinNative-Emu/proton-wine/releases/download/Assets/termuxfs-aarch64.tar
+          tar -xf termuxfs-aarch64.tar
+
+      - name: Cache Android NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ~/Android/Sdk/ndk/27.3.13750724
+          key: android-ndk-r27d
+
+      - name: Set up Android NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p $HOME/Android/Sdk/ndk
+          cd $HOME/Android/Sdk/ndk
+          wget -q https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          unzip -q android-ndk-r27d-linux.zip
+          mv android-ndk-r27d 27.3.13750724
+
+      - name: Cache LLVM MinGW toolchain
+        id: cache-llvm-mingw
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchains/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64
+          key: bylaws-llvm-mingw-20250920
+
+      - name: Set up LLVM MinGW toolchain
+        if: steps.cache-llvm-mingw.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p $HOME/toolchains
+          cd $HOME/toolchains
+          wget -q https://github.com/bylaws/llvm-mingw/releases/download/20250920/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
+          tar -xf llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
+
+      - name: Build android_sysvshm
+        run: |
+          set -e
+          # X_LIBS names this library, and configure links every X11 probe
+          # against X_LIBS, so without it -lX11/-lXext/-lXi all report "not
+          # found" and configure dies on --with-xshm.
+          bash "$GITHUB_WORKSPACE/fixes/android/android_sysvshm/build-aarch64.sh"
+          DEPS=$HOME/termuxfs/aarch64/data/data/com.termux/files/usr
+          mkdir -p "$DEPS/lib"
+          cp "$GITHUB_WORKSPACE/fixes/android/android_sysvshm/build-aarch64/libandroid-sysvshm.so" "$DEPS/lib/"
+          test -f "$DEPS/lib/libandroid-sysvshm.so"
+
+      - name: Autogen
+        working-directory: src
+        run: ./autogen.sh
+
+      - name: Build wine-tools
+        working-directory: src
+        run: |
+          set -e
+          mkdir -p wine-tools
+          cd wine-tools
+          ../configure --without-x --without-gstreamer --without-vulkan --without-wayland
+          make -j$(nproc) __tooldeps__ nls/all
+
+      - name: Configure (the known-good build.sh flags)
+        working-directory: src
+        run: |
+          set -e
+          DEPS=$HOME/termuxfs/aarch64/data/data/com.termux/files/usr
+          TC=$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin
+          export PATH=$HOME/toolchains/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64/bin:$PATH
+          TARGET=aarch64-linux-android
+          export CC="$TC/clang --target=$TARGET$API_LEVEL"
+          export AS="$CC"
+          export CXX="$TC/clang++ --target=$TARGET$API_LEVEL"
+          export AR=$TC/llvm-ar RANLIB=$TC/llvm-ranlib STRIP=$TC/llvm-strip LD=$TC/ld
+          export DLLTOOL=$HOME/toolchains/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64/bin/llvm-dlltool
+          export PKG_CONFIG_LIBDIR=$DEPS/lib/pkgconfig:$DEPS/share/pkgconfig
+          export ACLOCAL_PATH=$DEPS/lib/aclocal:$DEPS/share/aclocal
+          export CPPFLAGS="-I$DEPS/include/ --sysroot=$TC/../sysroot"
+          export CFLAGS="-Wno-declaration-after-statement -Wno-implicit-function-declaration -Wno-int-conversion"
+          export CXXFLAGS="$CFLAGS"
+          export LDFLAGS="-L$DEPS/lib -Wl,-rpath=/data/data/com.termux/files/usr/lib"
+          export FREETYPE_CFLAGS="-I$DEPS/include/freetype2"
+          export PULSE_CFLAGS="-I$DEPS/include/pulse"
+          export PULSE_LIBS="-L$DEPS/lib/pulseaudio -lpulse"
+          export SDL2_CFLAGS="-I$DEPS/include/SDL2"
+          export SDL2_LIBS="-L$DEPS/lib -lSDL2"
+          export X_CFLAGS="-I$DEPS/include"
+          export X_LIBS="-L$DEPS/lib -landroid-sysvshm"
+          export GSTREAMER_CFLAGS="-I$DEPS/include/gstreamer-1.0 -I$DEPS/include/glib-2.0 -I$DEPS/lib/glib-2.0/include -I$DEPS/glib-2.0/include -I$DEPS/lib/gstreamer-1.0/include"
+          export GSTREAMER_LIBS="-L$DEPS/lib -lgstgl-1.0 -lgstapp-1.0 -lgstvideo-1.0 -lgstaudio-1.0 -lglib-2.0 -lgobject-2.0 -lgio-2.0 -lgsttag-1.0 -lgstbase-1.0 -lgstreamer-1.0"
+          export FFMPEG_CFLAGS="-I$DEPS/include/libavutil -I$DEPS/include/libavcodec -I$DEPS/include/libavformat"
+          export FFMPEG_LIBS="-L$DEPS/lib -lavutil -lavcodec -lavformat"
+          INSTALL_DIR=$DEPS/../opt/wine
+
+          # Verbatim from the known-good build.sh, including the --without-xinput
+          # --without-xinput2 --without-xcursor that the newer script drops.
+          ./configure --with-wine-tools=./wine-tools --host $TARGET$API_LEVEL \
+            --with-mingw=clang --with-pulse --with-ffmpeg --with-gstreamer --with-pthread \
+            --without-dbus --with-freetype --enable-wineandroid_drv=no --without-cups \
+            --without-v4l2 --enable-nls --disable-tests --without-capi --without-coreaudio \
+            --without-gettext --with-gettextpo=no --without-gphoto --without-inotify \
+            --without-netapi --without-opencl --without-oss --without-pcap --without-sane \
+            --without-udev --without-unwind --without-usb --without-xfixes \
+            --without-xcomposite --without-xcursor --without-xinerama --without-xinput \
+            --without-xinput2 --without-xrandr --without-xrender --without-xshape \
+            --with-xshm --without-xxf86vm --enable-archs=arm64ec,aarch64,i386 \
+            --without-wayland --without-pcsclite --prefix $INSTALL_DIR \
+            --bindir $INSTALL_DIR/bin --libdir $INSTALL_DIR/lib --exec-prefix $INSTALL_DIR \
+            2>&1 | tee /tmp/configure.log
+
+          test -f Makefile || { grep -E "configure: error|is an error since" /tmp/configure.log | head -20; exit 1; }
+          grep -q "define SONAME_LIBSDL2" include/config.h \
+            || { echo "SDL2 not found - controllers would not work"; exit 1; }
+          # These must be off, exactly as in the working build.
+          if grep -qE "^#define SONAME_LIBXI " include/config.h; then
+            echo "XInput2 got enabled - diverges from the known-good build"; exit 1
+          fi
+          echo "Configure matches the known-good build."
+
+      - name: Build
+        working-directory: src
+        run: |
+          DEPS=$HOME/termuxfs/aarch64/data/data/com.termux/files/usr
+          export PATH=$HOME/toolchains/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64/bin:$PATH
+          make -j$(nproc)
+          make install
+          test -f $DEPS/../opt/wine/lib/wine/aarch64-unix/ntdll.so
+
+      - name: Stage the tree
+        run: |
+          set -e
+          DEPS=$HOME/termuxfs/aarch64/data/data/com.termux/files/usr
+          IN=$DEPS/../opt/wine
+          OUT=$HOME/wcp-out
+          mkdir -p $OUT/bin $OUT/lib $OUT/share
+          cp -r $IN/bin/wine* $IN/bin/reg* $IN/bin/msi* $OUT/bin/ 2>/dev/null || true
+          cp -r $IN/bin/notepad $OUT/bin/ 2>/dev/null || true
+          cp -r $IN/lib/wine $OUT/lib/
+          cp -r $IN/share/wine $OUT/share/
+          for f in bin/wine lib/wine/aarch64-unix/ntdll.so lib/wine/aarch64-unix/winebus.so \
+                   lib/wine/aarch64-windows/explorer.exe; do
+            test -e "$OUT/$f" || { echo "missing $f"; exit 1; }
+          done
+
+      - name: Verify UnixLibs is in, and nothing else changed
+        run: |
+          set -e
+          OUT=$HOME/wcp-out
+          NM=$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm
+          "$NM" --defined-only "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q load_unixlib_by_name
+          strings "$OUT/lib/wine/aarch64-windows/explorer.exe" | grep -q "WINE_NO_DUPLICATE_EXPLORER"
+          # We deliberately did NOT add the drive or controller patches here.
+          if strings "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q "anon-remap"; then
+            echo "anon-remap present - this build should not contain it"; exit 1
+          fi
+          echo "UnixLibs present; start-menu fix present; no extra patches."
+
+      - name: Strip
+        run: |
+          STRIP=$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+          OUT=$HOME/wcp-out
+          before=$(du -sm "$OUT" | cut -f1)
+          find "$OUT" -type f \( -name '*.so' -o -name 'wine' -o -name 'wine-preloader' \) \
+            -exec "$STRIP" --strip-debug {} + 2>/dev/null || true
+          find "$OUT" -type f \( -name '*.dll' -o -name '*.exe' -o -name '*.sys' -o -name '*.drv' \) \
+            -exec "$STRIP" --strip-debug {} + 2>/dev/null || true
+          echo "Stripped: ${before}MB -> $(du -sm "$OUT" | cut -f1)MB"
+          "$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" \
+            --defined-only "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q load_unixlib_by_name
+
+      - name: Take the prefixPack from the known-good wcp
+        run: |
+          set -e
+          # Same prefix the working package ships; its file list is identical to
+          # the app's own proton-9.0-arm64ec container pattern.
+          curl -sL --retry 3 -o /tmp/ref.wcp \
+            https://github.com/Xnick417x/winlator-nightly-wcp/releases/download/GameNative/Proton.9.0-arm64ec.wcp
+          mkdir -p /tmp/ref && tar xJf /tmp/ref.wcp -C /tmp/ref prefixPack.txz
+          cp /tmp/ref/prefixPack.txz $GITHUB_WORKSPACE/prefixPack.txz
+          test "$(stat -c%s $GITHUB_WORKSPACE/prefixPack.txz)" -gt 1000000
+          tar tJf $GITHUB_WORKSPACE/prefixPack.txz | grep -q "^.wine/system.reg$"
+          echo "prefixPack.txz = $(stat -c%s $GITHUB_WORKSPACE/prefixPack.txz) bytes"
+
+      - name: Package .wcp
+        run: |
+          set -e
+          OUT=$HOME/wcp-out
+          cat > $OUT/profile.json << 'JSON'
+          {
+            "type": "Proton",
+            "versionName": "9.0-arm64ec-unixlibs",
+            "versionCode": 0,
+            "description": "Proton 9.0 arm64ec (known-good build) + FEX UnixLibs",
+            "files": [],
+            "wine": {
+              "binPath": "bin",
+              "libPath": "lib",
+              "prefixPack": "prefixPack.txz"
+            }
+          }
+          JSON
+          cp $GITHUB_WORKSPACE/prefixPack.txz "$OUT/"
+          cd "$OUT"
+          # The known-good wcp is xz, so match it rather than switching to zstd.
+          tar cf - bin lib share prefixPack.txz profile.json | xz -T0 -6 \
+            > $GITHUB_WORKSPACE/Proton-9.0-arm64ec-UnixLibs.wcp
+          ls -lh $GITHUB_WORKSPACE/Proton-9.0-arm64ec-UnixLibs.wcp
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Proton-9.0-arm64ec-UnixLibs-api${{ env.API_LEVEL }}
+          path: Proton-9.0-arm64ec-UnixLibs.wcp
+          retention-days: 30
