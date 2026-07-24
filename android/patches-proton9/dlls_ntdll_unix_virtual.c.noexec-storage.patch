@@ -1,0 +1,122 @@
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 81726328..1e091b70 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2068,7 +2068,17 @@ static NTSTATUS get_vprot_flags( DWORD protect, unsigned int *vprot, BOOL image
+ /***********************************************************************
+  *           mprotect_exec
+  *
+- * Wrapper for mprotect, adds PROT_EXEC if forced by force_exec_prot
++ * Wrapper for mprotect, adds PROT_EXEC if forced by force_exec_prot.
++ *
++ * Android W^X workaround: kernels with W^X enforcement refuse mprotect()
++ * with PROT_WRITE|PROT_EXEC set simultaneously. PE images that mark a
++ * section as IMAGE_SCN_MEM_READ|MEM_WRITE|MEM_EXECUTE (e.g. Enigma-packed
++ * binaries) end up with the X bit silently stripped. If that happens,
++ * fall back to PROT_READ|PROT_EXEC here (the page becomes executable but
++ * not writable). Subsequent writes to the page will trap via SIGSEGV and
++ * virtual_handle_fault() flips the page back to PROT_READ|PROT_WRITE; an
++ * execute fault flips it back to PROT_READ|PROT_EXEC. This W<->X juggling
++ * is the standard JIT pattern that Android's own ART uses.
+  */
+ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
+ {
+@@ -2080,7 +2090,97 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
+         if (!(unix_prot & PROT_WRITE)) return -1;
+     }
+ 
+-    return mprotect( base, size, unix_prot );
++    /* First try the requested protection as-is. */
++    if (!mprotect( base, size, unix_prot )) return 0;
++    {
++        int saved_errno = errno;
++
++        /* Android noexec-mount escape hatch: if the caller wants PROT_EXEC
++         * and mprotect refused (EACCES typical when the file backing the
++         * mapping is on a `noexec` mount, e.g. /storage/emulated/0 FUSE),
++         * the only way to obtain an executable page at this address is to
++         * detach from the file and re-back the range with anonymous memory.
++         * Save current contents, atomically replace the mapping with anon,
++         * restore contents, then mprotect to the target permissions.
++         *
++         * This makes PE images loaded from /storage/emulated/0 (Android
++         * external storage), /sdcard, or any other noexec-mounted FS work,
++         * which is what lets games launch from drives other than C:. Same
++         * approach used by FEX and by the wine-bionic Android forks. */
++        if ((unix_prot & PROT_EXEC) && (saved_errno == EACCES || saved_errno == EPERM))
++        {
++            void *tmp;
++            int orig_prot = 0;
++
++            ERR( "mprotect(prot=0x%x) refused on %p-%p (errno=%d); attempting "
++                 "anon-remap to bypass noexec-FS\n",
++                 unix_prot, base, (char *)base + size - 1, saved_errno );
++
++            /* We are about to memcpy() out of the range, so it must be
++             * readable. Most callers leave the page readable (the initial PE
++             * mmap is PROT_READ), but a PROT_NONE range would fault, so make
++             * it readable first and give up if even that is refused. */
++            if (mprotect( base, size, PROT_READ ) && mprotect( base, size, PROT_READ | PROT_WRITE ))
++            {
++                WARN( "anon-remap: cannot make %p-%p readable, giving up\n",
++                      base, (char *)base + size - 1 );
++                errno = saved_errno;
++                return -1;
++            }
++
++            tmp = mmap( NULL, size, PROT_READ | PROT_WRITE,
++                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0 );
++            if (tmp == MAP_FAILED) { errno = saved_errno; return -1; }
++
++            /* Save current contents. */
++            memcpy( tmp, base, size );
++
++            /* Atomically replace the file-backed mapping with anonymous. */
++            if (mmap( base, size, PROT_READ | PROT_WRITE,
++                      MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0 ) == MAP_FAILED)
++            {
++                int e = errno;
++                ERR( "anon-remap: MAP_FIXED replace failed errno=%d (mapping unchanged)\n", e );
++                munmap( tmp, size );
++                errno = saved_errno;
++                return -1;
++            }
++
++            /* Restore contents into the new anonymous mapping. */
++            memcpy( base, tmp, size );
++            munmap( tmp, size );
++
++            /* Now mprotect with the target permissions. Anonymous memory is
++             * exec-able regardless of noexec mount flags. */
++            if (!mprotect( base, size, unix_prot ))
++            {
++                ERR( "anon-remap success: %p-%p now prot=0x%x (was file-backed on noexec FS)\n",
++                     base, (char *)base + size - 1, unix_prot );
++                return 0;
++            }
++            orig_prot = errno;
++
++            /* If even anon mmap can't get the requested prot (e.g. Android
++             * W^X strict-mode refusing W|X), fall back to dropping W. The
++             * fault handlers in virtual_handle_fault() will flip W<->X
++             * on demand for the rare RWX-section games. */
++            if ((unix_prot & PROT_WRITE) && (unix_prot & PROT_EXEC))
++            {
++                if (!mprotect( base, size, unix_prot & ~PROT_WRITE ))
++                {
++                    ERR( "anon-remap+W^X-strip: %p-%p got R+X (W will trap-and-flip)\n",
++                         base, (char *)base + size - 1 );
++                    return 0;
++                }
++            }
++            ERR( "anon-remap: mprotect after replacement still failed errno=%d\n", orig_prot );
++            errno = orig_prot;
++            return -1;
++        }
++
++        errno = saved_errno;
++    }
++    return -1;
+ }
+ 
+ 

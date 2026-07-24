@@ -1,0 +1,62 @@
+diff --git a/dlls/winebus.sys/bus_sdl.c b/dlls/winebus.sys/bus_sdl.c
+index 1c438eaf..5575234c 100644
+--- a/dlls/winebus.sys/bus_sdl.c
++++ b/dlls/winebus.sys/bus_sdl.c
+@@ -1132,14 +1132,37 @@ NTSTATUS sdl_bus_init(void *args)
+ {
+     const char *mapping;
+     int i;
++    /* The SDL2 shipped in the Android runtime image is not always installed
++     * under the soname this build was configured against, so try every name
++     * it is known to appear as. Without udev this is winebus' only device
++     * backend, so a failed dlopen() here silently kills XInput, DirectInput
++     * and in-game SDL all at once. */
++    static const char *const sdl_sonames[] =
++    {
++        SONAME_LIBSDL2,
++        "libSDL2-2.0.so.0",
++        "libSDL2-2.0.so",
++        "libSDL2.so",
++    };
+ 
+     TRACE("args %p\n", args);
+ 
+     options = *(struct sdl_bus_options *)args;
+ 
+-    if (!(sdl_handle = dlopen(SONAME_LIBSDL2, RTLD_NOW)))
++    for (i = 0; i < ARRAY_SIZE(sdl_sonames); i++)
+     {
+-        WARN("could not load %s\n", SONAME_LIBSDL2);
++        if ((sdl_handle = dlopen(sdl_sonames[i], RTLD_NOW)))
++        {
++            TRACE("loaded SDL from %s\n", sdl_sonames[i]);
++            break;
++        }
++        TRACE("could not load %s: %s\n", sdl_sonames[i], dlerror());
++    }
++
++    if (!sdl_handle)
++    {
++        WARN("could not load SDL from any known soname (tried %s and libSDL2-2.0.so.0, "
++             "libSDL2-2.0.so, libSDL2.so)\n", SONAME_LIBSDL2);
+         return STATUS_UNSUCCESSFUL;
+     }
+ #define LOAD_FUNCPTR(f)                          \
+@@ -1210,8 +1233,15 @@ NTSTATUS sdl_bus_init(void *args)
+ 
+     if (pSDL_Init(SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC) < 0)
+     {
+-        ERR("could not init SDL: %s\n", pSDL_GetError());
+-        goto failed;
++        /* The haptic subsystem is frequently unavailable on Android, and
++         * SDL_Init() fails as a whole when any requested subsystem fails.
++         * Losing rumble is acceptable; losing every gamepad is not. */
++        WARN("could not init SDL with haptics: %s; retrying without\n", pSDL_GetError());
++        if (pSDL_Init(SDL_INIT_GAMECONTROLLER) < 0)
++        {
++            ERR("could not init SDL: %s\n", pSDL_GetError());
++            goto failed;
++        }
+     }
+ 
+     if ((quit_event = pSDL_RegisterEvents(1)) == -1)
