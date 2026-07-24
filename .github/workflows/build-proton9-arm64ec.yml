@@ -253,10 +253,27 @@ jobs:
           strings "$OUT/lib/wine/aarch64-unix/winebus.so" | grep -qx "libSDL2-2.0.so"
           echo "Post-strip verification OK."
 
-      - name: Download prefixPack (arm64ec)
+      - name: Fetch the Proton 9 prefix pattern
         run: |
-          wget -q https://github.com/WinNative-Emu/proton-wine/releases/download/Assets/prefixPack-arm64ec-11.txz \
-            -O $GITHUB_WORKSPACE/prefixPack.txz
+          set -e
+          # Must be the Proton 9 pattern, not prefixPack-arm64ec-11.txz: that
+          # one is a Proton 11 prefix whose dosdevices point into
+          # /data/data/com.winlator.cmod, the app's old package name, so its
+          # z: and e: links are dead on a current install.
+          git clone --depth 1 --filter=blob:none --no-checkout \
+            https://github.com/WinNative-Emu/WinNative.git wn
+          cd wn
+          git lfs install --local
+          git checkout HEAD -- app/src/main/assets/proton-9.0-arm64ec_container_pattern.tzst
+          git lfs pull --include="app/src/main/assets/proton-9.0-arm64ec_container_pattern.tzst"
+          SRC=app/src/main/assets/proton-9.0-arm64ec_container_pattern.tzst
+          # An unresolved LFS pointer is a few hundred bytes of ASCII; the real
+          # archive is megabytes of zstd. Refuse to package the pointer.
+          test "$(stat -c%s "$SRC")" -gt 1000000 \
+            || { echo "LFS fetch failed - got a pointer, not the archive"; head -c 200 "$SRC"; exit 1; }
+          zstd -t "$SRC"
+          cp "$SRC" $GITHUB_WORKSPACE/prefixPack.tzst
+          echo "prefixPack.tzst = $(stat -c%s $GITHUB_WORKSPACE/prefixPack.tzst) bytes"
 
       - name: Generate profile.json
         run: |
@@ -270,7 +287,7 @@ jobs:
             "wine": {
               "binPath": "bin",
               "libPath": "lib",
-              "prefixPack": "prefixPack.txz"
+              "prefixPack": "prefixPack.tzst"
             }
           }
           JSON
@@ -278,10 +295,10 @@ jobs:
       - name: Package .wcp
         run: |
           OUT=$HOME/compiled-files-aarch64
-          cp $GITHUB_WORKSPACE/prefixPack.txz "$OUT/"
+          cp $GITHUB_WORKSPACE/prefixPack.tzst "$OUT/"
           cp $GITHUB_WORKSPACE/profile.json "$OUT/"
           cd "$OUT"
-          tar cf - bin lib share prefixPack.txz profile.json \
+          tar cf - bin lib share prefixPack.tzst profile.json \
             | zstd -T0 -19 -o Proton-9-Arm64EC-DriveFix-ControllerFix.wcp
           mv Proton-9-Arm64EC-DriveFix-ControllerFix.wcp $GITHUB_WORKSPACE/
           ls -lh $GITHUB_WORKSPACE/Proton-9-Arm64EC-DriveFix-ControllerFix.wcp

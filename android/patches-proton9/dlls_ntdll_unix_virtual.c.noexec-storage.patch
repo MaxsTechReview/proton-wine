@@ -1,5 +1,5 @@
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 81726328..1e091b70 100644
+index 81726328..1ce166e5 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
 @@ -2068,7 +2068,17 @@ static NTSTATUS get_vprot_flags( DWORD protect, unsigned int *vprot, BOOL image
@@ -21,7 +21,7 @@ index 81726328..1e091b70 100644
   */
  static inline int mprotect_exec( void *base, size_t size, int unix_prot )
  {
-@@ -2080,7 +2090,97 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
+@@ -2080,7 +2090,112 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
          if (!(unix_prot & PROT_WRITE)) return -1;
      }
  
@@ -47,6 +47,21 @@ index 81726328..1e091b70 100644
 +        {
 +            void *tmp;
 +            int orig_prot = 0;
++
++            /* Distinguish the two reasons the kernel refuses this. A W^X
++             * refusal (PROT_WRITE|PROT_EXEC together) has nothing to do with
++             * the backing file and is common on ordinary internal storage,
++             * where the executable already works: dropping PROT_WRITE gets
++             * the page executable without disturbing the mapping at all, and
++             * virtual_handle_fault() flips W<->X on demand afterwards. Try
++             * that first, so the destructive path below is reached only when
++             * the file's own filesystem is what forbids execution. */
++            if ((unix_prot & PROT_WRITE) && !mprotect( base, size, unix_prot & ~PROT_WRITE ))
++            {
++                WARN( "W^X refused W|X on %p-%p; kept R+X (W will trap-and-flip)\n",
++                      base, (char *)base + size - 1 );
++                return 0;
++            }
 +
 +            ERR( "mprotect(prot=0x%x) refused on %p-%p (errno=%d); attempting "
 +                 "anon-remap to bypass noexec-FS\n",
