@@ -42,6 +42,13 @@ on:
 env:
   API_LEVEL: ${{ github.event.inputs.api || '28' }}
   SRC_COMMIT: a470c2ed
+  # Bisect switch. The unmodified reference wcp opens the start menu and this
+  # build, from the same source lineage, does not -- so the difference is in
+  # how we build, not in the source. Setting this to 0 produces a plain
+  # rebuild of a470c2ed with no patches at all: if that opens the start menu
+  # the UnixLibs patch is responsible, and if it does not, our toolchain or
+  # configure differs from the original in a way that matters.
+  APPLY_UNIXLIBS: "0"
 
 jobs:
   build:
@@ -77,6 +84,7 @@ jobs:
           echo "start-menu fix present"
 
       - name: Apply the UnixLibs patch (the only change we add)
+        if: env.APPLY_UNIXLIBS == '1'
         working-directory: src
         run: |
           set -e
@@ -273,7 +281,14 @@ jobs:
           set -e
           OUT=$HOME/wcp-out
           NM=$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm
-          "$NM" --defined-only "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q load_unixlib_by_name
+          if [ "$APPLY_UNIXLIBS" = "1" ]; then
+            "$NM" --defined-only "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q load_unixlib_by_name
+          else
+            echo "baseline build: UnixLibs deliberately absent"
+            if "$NM" --defined-only "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q load_unixlib_by_name; then
+              echo "UnixLibs present in a baseline build - the patch step ran"; exit 1
+            fi
+          fi
           strings "$OUT/lib/wine/aarch64-windows/explorer.exe" | grep -q "WINE_NO_DUPLICATE_EXPLORER"
           # We deliberately did NOT add the drive or controller patches here.
           if strings "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q "anon-remap"; then
@@ -291,8 +306,10 @@ jobs:
           find "$OUT" -type f \( -name '*.dll' -o -name '*.exe' -o -name '*.sys' -o -name '*.drv' \) \
             -exec "$STRIP" --strip-debug {} + 2>/dev/null || true
           echo "Stripped: ${before}MB -> $(du -sm "$OUT" | cut -f1)MB"
-          "$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" \
-            --defined-only "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q load_unixlib_by_name
+          if [ "$APPLY_UNIXLIBS" = "1" ]; then
+            "$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" \
+              --defined-only "$OUT/lib/wine/aarch64-unix/ntdll.so" | grep -q load_unixlib_by_name
+          fi
 
       - name: Take the prefixPack from the known-good wcp
         run: |
@@ -315,9 +332,9 @@ jobs:
           cat > $OUT/profile.json << 'JSON'
           {
             "type": "Proton",
-            "versionName": "9.0-arm64ec-unixlibs",
+            "versionName": "9.0-arm64ec-baseline",
             "versionCode": 0,
-            "description": "Proton 9.0 arm64ec (known-good build) + FEX UnixLibs",
+            "description": "Proton 9.0 arm64ec baseline rebuild (bisect: no patches)",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -330,12 +347,12 @@ jobs:
           cd "$OUT"
           # The known-good wcp is xz, so match it rather than switching to zstd.
           tar cf - bin lib share prefixPack.txz profile.json | xz -T0 -6 \
-            > $GITHUB_WORKSPACE/Proton-9.0-arm64ec-UnixLibs.wcp
-          ls -lh $GITHUB_WORKSPACE/Proton-9.0-arm64ec-UnixLibs.wcp
+            > $GITHUB_WORKSPACE/Proton-9.0-arm64ec-Baseline.wcp
+          ls -lh $GITHUB_WORKSPACE/Proton-9.0-arm64ec-Baseline.wcp
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: Proton-9.0-arm64ec-UnixLibs-api${{ env.API_LEVEL }}
-          path: Proton-9.0-arm64ec-UnixLibs.wcp
+          name: Proton-9.0-arm64ec-Baseline-api${{ env.API_LEVEL }}
+          path: Proton-9.0-arm64ec-Baseline.wcp
           retention-days: 30
