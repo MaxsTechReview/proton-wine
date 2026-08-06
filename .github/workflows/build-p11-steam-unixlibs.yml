@@ -276,9 +276,12 @@ jobs:
           A=$GITHUB_WORKSPACE/$ASSET
           head -c4 "$A" | xxd -p | grep -qi '^28b52ffd$' || { echo "ERROR: .wcp is not zstd"; exit 1; }
           # profile.json and prefixPack must sit at the archive root: ContentsManager looks for
-          # them in the extraction root, not in a nested directory.
-          tar --zstd -tf "$A" | grep -qx 'profile.json'    || { echo "ERROR: profile.json not at root"; exit 1; }
-          tar --zstd -tf "$A" | grep -qx 'prefixPack.tzst' || { echo "ERROR: prefixPack.tzst not at root"; exit 1; }
+          # them in the extraction root, not in a nested directory. List once into a file --
+          # piping tar into `grep -q` makes grep exit early, and the resulting SIGPIPE on tar
+          # trips pipefail even though the entry was found.
+          tar --zstd -tf "$A" > /tmp/wcp-list.txt
+          grep -qx 'profile.json'    /tmp/wcp-list.txt || { echo "ERROR: profile.json not at root"; exit 1; }
+          grep -qx 'prefixPack.tzst' /tmp/wcp-list.txt || { echo "ERROR: prefixPack.tzst not at root"; exit 1; }
           echo "--- profile.json as packaged ---"
           tar --zstd -xOf "$A" profile.json | jq .
           echo "--- top-level entries ---"
