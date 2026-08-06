@@ -366,6 +366,7 @@ static WORD get_alt_machine( WORD machine )
 static void set_dll_path(void)
 {
     char *p, *path = getenv( "WINEDLLPATH" ), *be_runtime = getenv( "PROTON_BATTLEYE_RUNTIME" ), *eac_runtime = getenv( "PROTON_EAC_RUNTIME" );
+    char *prefix = getenv( "PREFIX" );
     int i, count = 0;
 
     if (path) for (p = path, count = 1; *p; p++) if (*p == ':') count++;
@@ -375,6 +376,9 @@ static void set_dll_path(void)
 
     if (eac_runtime)
         count += 2;
+
+    if (prefix && *prefix)
+        count += 1;
 
     dll_paths = malloc( (count + 2) * sizeof(*dll_paths) );
     count = 0;
@@ -422,6 +426,21 @@ static void set_dll_path(void)
         strcat(p, lib64);
 
         dll_paths[count++] = p;
+    }
+
+    /* Winlator/WinNative bionic containers set PREFIX to the imagefs mount; components
+     * (e.g. a FEX-unix companion) drop their unixlibs under $PREFIX/lib/wine. Add it as
+     * the lowest-priority search dir so the builtin's own dir always wins. */
+    if (prefix && *prefix)
+    {
+        const char suffix[] = "/lib/wine";
+
+        if ((p = malloc( strlen(prefix) + strlen(suffix) + 1 )))
+        {
+            strcpy( p, prefix );
+            strcat( p, suffix );
+            dll_paths[count++] = p;
+        }
     }
 
     for (i = 0; i < count; i++) dll_path_maxlen = max( dll_path_maxlen, strlen(dll_paths[i]) );
@@ -1745,39 +1764,76 @@ done:
 NTSTATUS load_unixlib_by_name( const UNICODE_STRING *nt_name, void **handle_ret )
 {
     const char *so_dir = get_so_dir( current_machine );
-    unsigned int i, len = nt_name->Length / sizeof(WCHAR);
+    unsigned int i, pos, maxlen = 0, len = nt_name->Length / sizeof(WCHAR);
+    char *ptr = NULL, *file = NULL, *ext = NULL;
     void *handle = NULL;
-    char *name, *path;
 
-    if (!(name = malloc( len + sizeof(".so") ))) return STATUS_NO_MEMORY;
+    if (!len) return STATUS_DLL_NOT_FOUND;
+
+    /* an explicit path is resolved through the normal NT -> unix name mapping */
+    for (i = 0; i < len; i++) if (nt_name->Buffer[i] == '/' || nt_name->Buffer[i] == '\\') break;
+    if (i < len)
+    {
+        UNICODE_STRING true_nt_name;
+        OBJECT_ATTRIBUTES attr;
+
+        InitializeObjectAttributes( &attr, (UNICODE_STRING *)nt_name, 0, 0, NULL );
+        /* get_nt_and_unix_names() always initialises the unix name, even on failure */
+        if (!get_nt_and_unix_names( &attr, &true_nt_name, &file, FILE_OPEN, FALSE ))
+        {
+            WARN( "load_unixlib_by_name: trying %s\n", debugstr_a(file) );
+            handle = dlopen( file, RTLD_NOW );
+        }
+        free( true_nt_name.Buffer );
+        goto done;
+    }
+
+    if (build_dir) maxlen = strlen(build_dir) + sizeof("/dlls/") + len;
+    maxlen = max( maxlen, dll_path_maxlen + 1 ) + len + sizeof("/aarch64-unix") + sizeof(".so");
+
+    if (!(file = malloc( maxlen ))) return STATUS_NO_MEMORY;
+
+    pos = maxlen - len - sizeof(".so");
+    ext = file + pos + len;
+    /* we don't want to depend on the current codepage here */
     for (i = 0; i < len; i++)
     {
-        WCHAR c = nt_name->Buffer[i];
-        if (c > 127) { free( name ); return STATUS_DLL_NOT_FOUND; }
-        name[i] = (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+        if (nt_name->Buffer[i] > 127) goto done;
+        file[pos + i] = (char)nt_name->Buffer[i];
+        if (file[pos + i] >= 'A' && file[pos + i] <= 'Z') file[pos + i] += 'a' - 'A';
+        else if (file[pos + i] == '.') ext = file + pos + i;
     }
-    name[len] = 0;
-    if (!strchr( name, '.' )) strcat( name, ".so" );
+    file[pos + len] = 0;
+    file[--pos] = '/';
 
-    if (build_dir && asprintf( &path, "%s/dlls/%s", build_dir, name ) != -1)
+    /* a unixlib is always <name>.so, so substitute at the extension (FEX asks for
+     * extensionless names such as "libarm64ecfex", the PE side asks for "foo.dll").
+     * In the build dir the directory component keeps the original extension, as in
+     * dlls/winex11.drv/winex11.so, so substitute only after building that path. */
+    if (build_dir)
     {
-        handle = dlopen( path, RTLD_NOW );
-        free( path );
+        ptr = prepend_build_dir_path( file + pos, ".so", "", "/dlls", build_dir );
+        strcpy( ext, ".so" );
+        WARN( "load_unixlib_by_name: trying %s\n", debugstr_a(ptr) );
+        if ((handle = dlopen( ptr, RTLD_NOW ))) goto done;
     }
-    for (i = 0; !handle && dll_paths[i]; i++)
+
+    strcpy( ext, ".so" );
+    for (i = 0; dll_paths[i]; i++)
     {
-        if (asprintf( &path, "%s%s/%s", dll_paths[i], so_dir, name ) != -1)
-        {
-            handle = dlopen( path, RTLD_NOW );
-            free( path );
-        }
-        if (!handle && asprintf( &path, "%s/%s", dll_paths[i], name ) != -1)
-        {
-            handle = dlopen( path, RTLD_NOW );
-            free( path );
-        }
+        ptr = prepend( file + pos, so_dir, strlen(so_dir) );
+        ptr = prepend( ptr, dll_paths[i], strlen(dll_paths[i]) );
+        WARN( "load_unixlib_by_name: trying %s\n", debugstr_a(ptr) );
+        if ((handle = dlopen( ptr, RTLD_NOW ))) goto done;
+
+        ptr = prepend( file + pos, dll_paths[i], strlen(dll_paths[i]) );
+        WARN( "load_unixlib_by_name: trying %s\n", debugstr_a(ptr) );
+        if ((handle = dlopen( ptr, RTLD_NOW ))) goto done;
     }
-    free( name );
+    WARN( "load_unixlib_by_name: no unixlib found for %s\n", debugstr_a(file + pos) );
+
+done:
+    free( file );
     if (!handle) return STATUS_DLL_NOT_FOUND;
     *handle_ret = handle;
     return STATUS_SUCCESS;
