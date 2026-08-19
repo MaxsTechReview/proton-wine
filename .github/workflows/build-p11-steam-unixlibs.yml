@@ -174,6 +174,31 @@ jobs:
             echo "NOTE: no symbol table in $NTDLL (stripped) -- source assertion already gated this."
           fi
 
+      # Runs after the symbol check above, which needs the symbol table. Wine's install
+      # leaves full debug info in the tree (~2GB arm64ec / ~1GB x86_64); stripping brings
+      # it to ~756MB / ~308MB, which is what the released layers carry.
+      - name: Strip the installed tree for ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          STRIP=$HOME/Android/Sdk/ndk/27.3.13750724/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+          if [ "${{ matrix.arch }}" == "x86_64" ]; then
+            OUT=$HOME/compiled-files-x86_64
+          else
+            OUT=$HOME/compiled-files-aarch64
+          fi
+          before=$(du -sm "$OUT" | cut -f1)
+          # llvm-strip is COFF/arm64ec- and ELF-aware, so it covers both the PE modules and
+          # the unix .so loaders. --strip-all keeps PE exports and ELF .dynsym (the unixlibs'
+          # __wine_unix_call_funcs entry point lives there); --strip-debug is the fallback,
+          # and an unexpected format never fails the build.
+          find "$OUT" -type f \( -name '*.so' -o -name '*.dll' -o -name '*.exe' -o -name '*.drv' \
+               -o -name 'wine*' -o -name 'msi*' -o -name 'reg*' -o -name 'notepad' \) -print0 \
+            | while IFS= read -r -d '' f; do
+                "$STRIP" --strip-all "$f" 2>/dev/null || "$STRIP" --strip-debug "$f" 2>/dev/null || true
+              done
+          after=$(du -sm "$OUT" | cut -f1)
+          echo "tree: ${before}MB -> ${after}MB after strip"
+
       - name: Build prefixPack.tzst for ${{ matrix.arch }}
         run: |
           set -euo pipefail
