@@ -51,7 +51,7 @@ jobs:
             build-essential git wget curl unzip flex bison gettext autoconf \
             automake libtool pkg-config mingw-w64 gcc-multilib g++-multilib \
             libfreetype6-dev libfreetype6-dev:i386 libpng-dev libpng-dev:i386 \
-            zlib1g-dev zlib1g-dev:i386 zstd jq
+            zlib1g-dev zlib1g-dev:i386 zstd jq xxd
 
       # The unixlib loader is compiled into ntdll's unix half. It is a static
       # function, so it is invisible to nm once the tree is stripped -- assert on the
@@ -168,7 +168,10 @@ jobs:
             NTDLL=$HOME/compiled-files-aarch64/lib/wine/aarch64-unix/ntdll.so
           fi
           test -f "$NTDLL" || { echo "ERROR: $NTDLL missing"; exit 1; }
-          if "$NM" "$NTDLL" 2>/dev/null | grep -q load_unixlib_by_name; then
+          # dump once rather than piping into `grep -q`: grep exits on first match and the
+          # SIGPIPE it sends back would trip pipefail even on a successful match.
+          "$NM" "$NTDLL" > /tmp/ntdll-syms.txt 2>/dev/null || true
+          if grep -q load_unixlib_by_name /tmp/ntdll-syms.txt; then
             echo "OK: load_unixlib_by_name present in $NTDLL"
           else
             echo "NOTE: no symbol table in $NTDLL (stripped) -- source assertion already gated this."
