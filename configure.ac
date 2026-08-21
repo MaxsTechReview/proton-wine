@@ -680,6 +680,7 @@ AC_CHECK_HEADERS(\
 	gettext-po.h \
 	link.h \
 	linux/cdrom.h \
+	linux/errqueue.h \
 	linux/filter.h \
 	linux/fs.h \
 	linux/futex.h \
@@ -728,6 +729,7 @@ AC_CHECK_HEADERS(\
 	sys/modem.h \
 	sys/mtio.h \
 	sys/param.h \
+	sys/personality.h \
 	sys/prctl.h \
 	sys/ptrace.h \
 	sys/queue.h \
@@ -1224,6 +1226,7 @@ WINE_EXTLIB_FLAGS(LDAP, ldap, ldap, "-I\$(top_srcdir)/libs/ldap/include")
 WINE_EXTLIB_FLAGS(MPG123, mpg123, mpg123, "-I\$(top_srcdir)/libs/mpg123/src/include")
 WINE_EXTLIB_FLAGS(MUSL, musl, musl)
 WINE_EXTLIB_FLAGS(PNG, png, "png \$(ZLIB_PE_LIBS)", "-I\$(top_srcdir)/libs/png")
+WINE_EXTLIB_FLAGS(SQLITE3, sqlite3, sqlite3)
 WINE_EXTLIB_FLAGS(TIFF, tiff, "tiff \$(ZLIB_PE_LIBS)", "-I\$(top_srcdir)/libs/tiff/libtiff")
 WINE_EXTLIB_FLAGS(TOMCRYPT, tomcrypt, tomcrypt, "-I\$(top_srcdir)/libs/tomcrypt/src/headers -DLTC_NO_PROTOTYPES -DLTC_SOURCE")
 WINE_EXTLIB_FLAGS(VKD3D, vkd3d, vkd3d, "-I\$(top_srcdir)/libs/vkd3d/include")
@@ -2526,6 +2529,7 @@ WINE_CONFIG_MAKEFILE(dlls/advpack)
 WINE_CONFIG_MAKEFILE(dlls/advpack/tests)
 WINE_CONFIG_MAKEFILE(dlls/amsi)
 WINE_CONFIG_MAKEFILE(dlls/amd_ags_x64)
+WINE_CONFIG_MAKEFILE(dlls/amdxc64)
 WINE_CONFIG_MAKEFILE(dlls/amstream)
 WINE_CONFIG_MAKEFILE(dlls/amstream/tests)
 WINE_CONFIG_MAKEFILE(dlls/apisetschema)
@@ -3463,6 +3467,8 @@ WINE_CONFIG_MAKEFILE(dlls/winscard/tests)
 WINE_CONFIG_MAKEFILE(dlls/winsock.dll16)
 WINE_CONFIG_MAKEFILE(dlls/winspool.drv)
 WINE_CONFIG_MAKEFILE(dlls/winspool.drv/tests)
+WINE_CONFIG_MAKEFILE(dlls/winsqlite3)
+WINE_CONFIG_MAKEFILE(dlls/winsqlite3/tests)
 WINE_CONFIG_MAKEFILE(dlls/winsta)
 WINE_CONFIG_MAKEFILE(dlls/wintab.dll16)
 WINE_CONFIG_MAKEFILE(dlls/wintab32)
@@ -3585,6 +3591,7 @@ WINE_CONFIG_MAKEFILE(libs/mfuuid)
 WINE_CONFIG_MAKEFILE(libs/mpg123)
 WINE_CONFIG_MAKEFILE(libs/musl)
 WINE_CONFIG_MAKEFILE(libs/png)
+WINE_CONFIG_MAKEFILE(libs/sqlite3)
 WINE_CONFIG_MAKEFILE(libs/strmbase)
 WINE_CONFIG_MAKEFILE(libs/strmiids)
 WINE_CONFIG_MAKEFILE(libs/tiff)
