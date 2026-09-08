@@ -998,16 +998,42 @@ __ASM_GLOBAL_FUNC( NdrClientCall2,
                    "ldp x29, x30, [sp], #0x40\n\t"
                    "ret" )
 #elif defined(__arm64ec__)
+
+#define NDR_EC_STACK_WORDS 64
+
+static const ULONG_PTR *ndr_ec_stack_args( const ULONG_PTR *x4, ULONG_PTR arg0, ULONG_PTR arg1 )
+{
+    if (x4[-4] == arg0 && x4[-3] == arg1) return x4 + 4;
+    return x4;
+}
+
+static void ndr_ec_copy_stack( ULONG_PTR *dst, const ULONG_PTR *stack, unsigned int words )
+{
+    const ULONG_PTR *base = NtCurrentTeb()->Tib.StackBase;
+
+    if (stack < base && stack + words > base) words = base - stack;
+    memcpy( dst, stack, words * sizeof(ULONG_PTR) );
+}
+
+static LONG_PTR __attribute__((used, noinline)) ndr_ec_client_call2( PMIDL_STUB_DESC desc,
+        PFORMAT_STRING fmt, ULONG_PTR a2, ULONG_PTR a3, const ULONG_PTR *stack )
+{
+    ULONG_PTR args[NDR_EC_STACK_WORDS + 2];
+
+    args[0] = a2;
+    args[1] = a3;
+    ndr_ec_copy_stack( args + 2, ndr_ec_stack_args( stack, (ULONG_PTR)desc, (ULONG_PTR)fmt ),
+                       NDR_EC_STACK_WORDS );
+    return NdrpClientCall2( desc, fmt, (void **)args, FALSE );
+}
+
 CLIENT_CALL_RETURN __attribute__((naked)) NdrClientCall2( PMIDL_STUB_DESC desc, PFORMAT_STRING fmt, ... )
 {
     asm( ".seh_proc \"#NdrClientCall2\"\n\t"
          "stp x29, x30, [sp, #-0x20]!\n\t"
          ".seh_save_fplr_x 0x20\n\t"
          ".seh_endprologue\n\t"
-         "stp x2, x3, [x4, #-0x10]!\n\t"
-         "mov x2, x4\n\t"          /* stack */
-         "mov x3, #0\n\t"          /* fpu_stack */
-         "bl \"#NdrpClientCall2\"\n\t"
+         "bl \"#ndr_ec_client_call2\"\n\t"
          "ldp x29, x30, [sp], #0x20\n\t"
          "ret\n\t"
          ".seh_endproc" );
@@ -1832,16 +1858,26 @@ __ASM_GLOBAL_FUNC( NdrAsyncClientCall,
                    "ldp x29, x30, [sp], #0x40\n\t"
                    "ret" )
 #elif defined(__arm64ec__)
+
+static LONG_PTR __attribute__((used, noinline)) ndr_ec_async_client_call( PMIDL_STUB_DESC desc,
+        PFORMAT_STRING fmt, ULONG_PTR a2, ULONG_PTR a3, const ULONG_PTR *stack )
+{
+    ULONG_PTR args[NDR_EC_STACK_WORDS + 2];
+
+    args[0] = a2;
+    args[1] = a3;
+    ndr_ec_copy_stack( args + 2, ndr_ec_stack_args( stack, (ULONG_PTR)desc, (ULONG_PTR)fmt ),
+                       NDR_EC_STACK_WORDS );
+    return ndr_async_client_call( desc, fmt, (void **)args );
+}
+
 CLIENT_CALL_RETURN __attribute__((naked)) NdrAsyncClientCall( PMIDL_STUB_DESC desc, PFORMAT_STRING fmt, ... )
 {
     asm( ".seh_proc \"#NdrAsyncClientCall\"\n\t"
          "stp x29, x30, [sp, #-0x20]!\n\t"
          ".seh_save_fplr_x 0x20\n\t"
          ".seh_endprologue\n\t"
-         "stp x2, x3, [x4, #-0x10]!\n\t"
-         "mov x2, x4\n\t"          /* stack */
-         "mov x3, #0\n\t"          /* fpu_stack */
-         "bl \"#ndr_async_client_call\"\n\t"
+         "bl \"#ndr_ec_async_client_call\"\n\t"
          "ldp x29, x30, [sp], #0x20\n\t"
          "ret\n\t"
          ".seh_endproc" );
@@ -2210,15 +2246,25 @@ __ASM_GLOBAL_FUNC( NdrClientCall3,
                    "ldp x29, x30, [sp], #0x40\n\t"
                    "ret" )
 #elif defined(__arm64ec__)
+
+static LONG_PTR __attribute__((used, noinline)) ndr_ec_client_call3( MIDL_STUBLESS_PROXY_INFO *info,
+        ULONG proc, void *retval, ULONG_PTR a3, const ULONG_PTR *stack )
+{
+    ULONG_PTR args[NDR_EC_STACK_WORDS + 1];
+
+    args[0] = a3;
+    ndr_ec_copy_stack( args + 1, ndr_ec_stack_args( stack, (ULONG_PTR)info, proc ),
+                       NDR_EC_STACK_WORDS );
+    return ndr64_client_call( info, proc, retval, (void **)args );
+}
+
 CLIENT_CALL_RETURN __attribute__((naked)) NdrClientCall3( MIDL_STUBLESS_PROXY_INFO *info, ULONG proc, void *retval, ... )
 {
     asm( ".seh_proc \"#NdrClientCall3\"\n\t"
          "stp x29, x30, [sp, #-0x20]!\n\t"
          ".seh_save_fplr_x 0x20\n\t"
          ".seh_endprologue\n\t"
-         "str x3, [x4, #-0x8]!\n\t"
-         "mov x3, x4\n\t"          /* stack */
-         "bl \"#ndr64_client_call\"\n\t"
+         "bl \"#ndr_ec_client_call3\"\n\t"
          "ldp x29, x30, [sp], #0x20\n\t"
          "ret\n\t"
          ".seh_endproc" );
@@ -2280,16 +2326,25 @@ __ASM_GLOBAL_FUNC( Ndr64AsyncClientCall,
                    "ldp x29, x30, [sp], #0x40\n\t"
                    "ret" )
 #elif defined(__arm64ec__)
+
+static LONG_PTR __attribute__((used, noinline)) ndr_ec_async_client_call64( MIDL_STUBLESS_PROXY_INFO *info,
+        ULONG proc, void *retval, ULONG_PTR a3, const ULONG_PTR *stack )
+{
+    ULONG_PTR args[NDR_EC_STACK_WORDS + 1];
+
+    args[0] = a3;
+    ndr_ec_copy_stack( args + 1, ndr_ec_stack_args( stack, (ULONG_PTR)info, proc ),
+                       NDR_EC_STACK_WORDS );
+    return ndr64_async_client_call( info, proc, retval, (void **)args, NULL );
+}
+
 CLIENT_CALL_RETURN __attribute__((naked)) Ndr64AsyncClientCall( MIDL_STUBLESS_PROXY_INFO *info, ULONG proc, void *retval, ... )
 {
     asm( ".seh_proc \"#Ndr64AsyncClientCall\"\n\t"
          "stp x29, x30, [sp, #-0x20]!\n\t"
          ".seh_save_fplr_x 0x20\n\t"
          ".seh_endprologue\n\t"
-         "str x3, [x4, #-0x8]!\n\t"
-         "mov x3, x4\n\t"          /* stack */
-         "mov x4, #0\n\t"          /* fpu_stack */
-         "bl \"#ndr64_async_client_call\"\n\t"
+         "bl \"#ndr_ec_async_client_call64\"\n\t"
          "ldp x29, x30, [sp], #0x20\n\t"
          "ret\n\t"
          ".seh_endproc" );

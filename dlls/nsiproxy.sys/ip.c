@@ -25,8 +25,10 @@
 #include "config.h"
 #include "nsi_common.h"
 #include <stdarg.h>
+#include <stdlib.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 #include <net/if.h>
 
 #ifdef HAVE_NET_ROUTE_H
@@ -1503,29 +1505,23 @@ static NTSTATUS ipv4_forward_enumerate_all( void *key_data, UINT key_size, void 
     {
         if (wine_new_ndis) {
             TRACE( "Using alternative ndis implementation, output will be limited\n" );
-            struct ifaddrs *ifap;
+            struct ifaddrs *ifap, *ifhead;
             struct in_addr mask;
-            getifaddrs( &ifap );
-            while (ifap->ifa_next != NULL) {
-                if (!convert_unix_name_to_luid( ifap->ifa_name, &entry.luid )) {
-                    ifap = ifap->ifa_next;
-                    continue;
-                }
-                if (!convert_luid_to_index( &entry.luid, &entry.if_index )) {
-                    ifap = ifap->ifa_next;
-                    continue;
-                }
-                if (ifap->ifa_addr->sa_family != AF_INET) {
-                    ifap = ifap->ifa_next;
-                    continue;
-                }
-                struct sockaddr_in *sa = (struct sockaddr_in *)ifap->ifa_addr;
-                entry.prefix.s_addr = sa->sin_addr.s_addr;
-                entry.metric = 0;
-                struct sockaddr_in *nm = (struct sockaddr_in *)ifap->ifa_netmask;
-                mask.s_addr = nm->sin_addr.s_addr;
-                entry.next_hop.s_addr = (entry.prefix.s_addr & mask.s_addr) | htonl(1);
+            if (getifaddrs( &ifhead )) return STATUS_NO_MORE_ENTRIES;
+            for (ifap = ifhead; ifap != NULL; ifap = ifap->ifa_next) {
+                struct sockaddr_in *sa, *nm;
+                struct in_addr gateway;
+                if (!ifap->ifa_addr || ifap->ifa_addr->sa_family != AF_INET) continue;
+                if (!convert_unix_name_to_luid( ifap->ifa_name, &entry.luid )) continue;
+                if (!convert_luid_to_index( &entry.luid, &entry.if_index )) continue;
+                sa = (struct sockaddr_in *)ifap->ifa_addr;
+                nm = (struct sockaddr_in *)ifap->ifa_netmask;
+                mask.s_addr = nm ? nm->sin_addr.s_addr : 0xffffffff;
+
+                entry.prefix.s_addr = sa->sin_addr.s_addr & mask.s_addr;
                 entry.prefix_len = mask_v4_to_prefix( &mask );
+                entry.next_hop.s_addr = 0;
+                entry.metric = 0;
                 entry.protocol = MIB_IPPROTO_LOCAL;
                 entry.loopback = (ifap->ifa_flags & IFF_LOOPBACK) ? 1 : 0;
                 if (num < *count)
@@ -1537,8 +1533,30 @@ static NTSTATUS ipv4_forward_enumerate_all( void *key_data, UINT key_size, void 
                     static_data = (BYTE *)static_data + static_size;
                 }
                 num++;
-                ifap = ifap->ifa_next;
+
+                if (!entry.loopback && (ifap->ifa_flags & IFF_UP) && mask.s_addr && mask.s_addr != 0xffffffff)
+                {
+                    const char *gw_env = getenv( "WINE_ANDROID_GATEWAY" );
+                    if (!gw_env || !inet_aton( gw_env, &gateway ))
+                        gateway.s_addr = (sa->sin_addr.s_addr & mask.s_addr) | htonl( 1 );
+                    entry.prefix.s_addr = 0;
+                    entry.prefix_len = 0;
+                    entry.next_hop = gateway;
+                    entry.metric = 0;
+                    entry.protocol = MIB_IPPROTO_NETMGMT;
+                    entry.loopback = 0;
+                    if (num < *count)
+                    {
+                        ipv4_forward_fill_entry( &entry, key_data, rw_data, dynamic_data, static_data );
+                        key_data = (BYTE *)key_data + key_size;
+                        rw_data = (BYTE *)rw_data + rw_size;
+                        dynamic_data = (BYTE *)dynamic_data + dynamic_size;
+                        static_data = (BYTE *)static_data + static_size;
+                    }
+                    num++;
+                }
             }
+            freeifaddrs( ifhead );
         } else {
             struct ifaddrs *addrs, *ifentry;
             char buf[512], *ptr;

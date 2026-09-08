@@ -1,6 +1,6 @@
 EXTRADEFS = -D_USERENV_
 MODULE    = userenv.dll
-IMPORTS   = advapi32
+IMPORTS   = advapi32 bcrypt
 IMPORTLIB = userenv
 
 EXTRADLLFLAGS = -Wb,--prefer-native

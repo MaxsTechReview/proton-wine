@@ -29,6 +29,7 @@
 #include "winnls.h"
 #include "sddl.h"
 #include "objbase.h"
+#include "bcrypt.h"
 #include "userenv.h"
 
 #include "wine/debug.h"
@@ -696,4 +697,40 @@ HRESULT WINAPI CreateAppContainerProfile(PCWSTR container_name, PCWSTR display_n
           debugstr_w(description), capabilities, capability_count, container_sid);
 
     return E_NOTIMPL;
+}
+
+HRESULT WINAPI DeriveAppContainerSidFromAppContainerName(PCWSTR name, PSID *sid)
+{
+    static const SID_IDENTIFIER_AUTHORITY app_authority = { SECURITY_APP_PACKAGE_AUTHORITY };
+    unsigned char hash[32];
+    WCHAR *upper;
+    SIZE_T len, i;
+    SID *out;
+
+    TRACE("(%s, %p)\n", debugstr_w(name), sid);
+
+    if (!name || !sid) return E_INVALIDARG;
+
+    len = lstrlenW( name );
+    upper = HeapAlloc( GetProcessHeap(), 0, (len + 1) * sizeof(WCHAR) );
+    if (!upper) return E_OUTOFMEMORY;
+    for (i = 0; i < len; i++) upper[i] = RtlUpcaseUnicodeChar( name[i] );
+    upper[len] = 0;
+
+    if (BCryptHash( BCRYPT_SHA256_ALG_HANDLE, NULL, 0, (unsigned char *)upper,
+                    len * sizeof(WCHAR), hash, sizeof(hash) ))
+        memset( hash, 0, sizeof(hash) );
+    HeapFree( GetProcessHeap(), 0, upper );
+
+    out = HeapAlloc( GetProcessHeap(), 0, FIELD_OFFSET( SID, SubAuthority[9] ) );
+    if (!out) return E_OUTOFMEMORY;
+    out->Revision = SID_REVISION;
+    out->SubAuthorityCount = 9;
+    out->IdentifierAuthority = app_authority;
+    out->SubAuthority[0] = SECURITY_APP_PACKAGE_BASE_RID;
+    for (i = 0; i < 8; i++)
+        out->SubAuthority[i + 1] = ((DWORD *)hash)[i];
+
+    *sid = out;
+    return S_OK;
 }
